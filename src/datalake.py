@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -61,7 +62,7 @@ MAX_KEYS_INDEXED = 100_000  # guard against an unbounded bucket listing
 # The bucket is listed once per process and reused for every ticker. Listing it
 # per ticker meant a full pass over the lake for each flagged stock — with 30
 # stocks that was 30 identical passes, and it dominated the run time.
-_listing_cache: dict[tuple[str, str], list[tuple[str, int]]] = {}
+_listing_cache: dict[tuple[str, str, int], list[tuple[str, int]]] = {}
 _client_cache: list = []
 
 
@@ -79,22 +80,36 @@ def _s3_client():
     return _client_cache[0]
 
 
-def _bucket_listing(s3, bucket: str, prefix: str) -> list[tuple[str, int]]:
+def _bucket_listing(s3, bucket: str, prefix: str, max_age_days: int = 0) -> list[tuple[str, int]]:
     """(key, size) for every object under prefix — fetched once, then cached.
+
+    With `max_age_days` set, objects last modified before the cutoff are
+    discarded as the listing streams past. S3 has no server-side date filter
+    (ListObjectsV2 narrows by key prefix only), so every object is still walked;
+    what this saves is the memory and the per-ticker matching, not the API time.
+    Narrow `DATALAKE_S3_PREFIX` if the walk itself needs to get shorter.
 
     A failure is cached too, so a permissions problem is reported once rather
     than once per ticker.
     """
-    cache_key = (bucket, prefix)
+    cache_key = (bucket, prefix, max_age_days)
     if cache_key in _listing_cache:
         return _listing_cache[cache_key]
 
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days) if max_age_days > 0 else None
     keys: list[tuple[str, int]] = []
+    seen = 0
     capped = False
     try:
         paginator = s3.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
             for obj in page.get("Contents", []):
+                seen += 1
+                if cutoff is not None:
+                    modified = obj.get("LastModified")
+                    # Keep anything undated rather than silently dropping it.
+                    if modified is not None and modified < cutoff:
+                        continue
                 keys.append((obj["Key"], obj["Size"]))
             if len(keys) >= MAX_KEYS_INDEXED:
                 capped = True
@@ -104,7 +119,17 @@ def _bucket_listing(s3, bucket: str, prefix: str) -> list[tuple[str, int]]:
                 "Data lake listing capped at %d objects — set DATALAKE_S3_PREFIX to narrow the scan",
                 MAX_KEYS_INDEXED,
             )
-        log.info("Data lake: indexed %d object(s) from s3://%s/%s", len(keys), bucket, prefix)
+        if cutoff is not None:
+            log.info(
+                "Data lake: kept %d of %d object(s) modified in the last %d day(s) from s3://%s/%s",
+                len(keys),
+                seen,
+                max_age_days,
+                bucket,
+                prefix,
+            )
+        else:
+            log.info("Data lake: indexed %d object(s) from s3://%s/%s", len(keys), bucket, prefix)
     except Exception as e:  # noqa: BLE001
         log.warning("S3 data-lake listing failed — S3 context skipped for this run: %s", e)
         keys = []
@@ -113,7 +138,7 @@ def _bucket_listing(s3, bucket: str, prefix: str) -> list[tuple[str, int]]:
     return keys
 
 
-def scan_s3(ticker: str, max_files: int, max_chars: int) -> list[dict]:
+def scan_s3(ticker: str, max_files: int, max_chars: int, max_age_days: int = 0) -> list[dict]:
     bucket = os.environ.get("DATALAKE_S3_BUCKET")
     if not bucket or max_files <= 0:
         return []
@@ -125,7 +150,7 @@ def scan_s3(ticker: str, max_files: int, max_chars: int) -> list[dict]:
         log.warning("S3 data-lake client unavailable: %s", e)
         return []
 
-    for key, size in _bucket_listing(s3, bucket, prefix):
+    for key, size in _bucket_listing(s3, bucket, prefix, max_age_days):
         if len(hits) >= max_files:
             break
         if Path(key).suffix.lower() not in TEXT_EXT or size > 2_000_000:
@@ -148,6 +173,10 @@ def gather_context(ticker: str, cfg: dict) -> list[dict]:
         return []
     max_files = int(dl.get("max_files_per_ticker", 5))
     max_chars = int(dl.get("max_chars_per_file", 4000))
-    hits = scan_s3(ticker, max_files, max_chars)
+    # Age applies to S3 only. The local folder is checked out fresh on every CI
+    # run, so its file times say when the checkout happened, not when the note
+    # was written — filtering on them would be meaningless.
+    max_age_days = int(dl.get("max_age_days", 0) or 0)
+    hits = scan_s3(ticker, max_files, max_chars, max_age_days)
     hits += scan_local(ticker, dl.get("local_dir", ""), max(0, max_files - len(hits)), max_chars)
     return hits

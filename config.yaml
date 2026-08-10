@@ -49,3 +49,7 @@ datalake:
   local_dir: datalake_sample   # set to "" to disable local folder scan
   max_files_per_ticker: 5
   max_chars_per_file: 4000
+  # Only use S3 notes modified in the last N days. 0 = no age limit.
+  # Applies to S3 only — local files are re-checked-out every run, so their
+  # timestamps reflect the checkout, not when the note was written.
+  max_age_days: 7

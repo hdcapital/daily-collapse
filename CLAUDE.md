@@ -49,6 +49,10 @@ Everything degrades gracefully when a secret is missing — the run still produc
 - `datalake` lists the S3 bucket **once per process** (`_listing_cache`) and reuses it
   for every ticker; listing per ticker made the lake scan dominate run time (~25s ×
   40 stocks). Keep any new S3 code path going through `_bucket_listing`.
+- `datalake.max_age_days` drops stale objects **as the listing streams past** —
+  ListObjectsV2 has no server-side date filter, so this bounds memory and the cap,
+  not the walk time. The age is part of the listing cache key. It is deliberately
+  S3-only: local files are re-checked-out each run, so their mtimes are worthless.
 - Email HTML is autoescaped — `select_autoescape` must keep matching the `.j2`
   suffix, or AI/web-search text can inject markup into the report.
 - Email HTML must stay table-based with inline styles (Gmail/Outlook strip <style>).

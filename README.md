@@ -84,7 +84,10 @@ quiet day you get a short "no falls beyond threshold" note instead.
 Two sources, both optional and merged:
 
 * **S3** — set the `DATALAKE_*` secrets; files whose key contains the ticker are
-  pulled (text formats, ≤2MB) and snippets fed to the AI.
+  pulled (text formats, ≤2MB) and snippets fed to the AI. `datalake.max_age_days`
+  (default `7`) ignores objects last modified before that window; `0` uses the
+  whole bucket. Note S3 cannot filter by date server-side, so the bucket is still
+  walked in full — narrow `DATALAKE_S3_PREFIX` to shorten the walk itself.
 * **Local** — drop text/markdown notes into `datalake_sample/` (or repoint
   `datalake.local_dir` in config); any file mentioning the ticker is used.
 

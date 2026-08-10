@@ -23,13 +23,25 @@ class FakeBody:
 
 
 class FakeS3:
-    """Records how often the bucket is listed and which keys are downloaded."""
+    """Records how often the bucket is listed and which keys are downloaded.
 
-    def __init__(self, objects: dict[str, bytes], fail_listing: bool = False):
+    `ages` maps a key to how many days old it is (default: modified just now).
+    """
+
+    def __init__(self, objects: dict[str, bytes], fail_listing: bool = False, ages: dict | None = None):
         self.objects = objects
         self.fail_listing = fail_listing
+        self.ages = ages or {}
         self.list_calls = 0
         self.downloaded: list[str] = []
+
+    def _modified(self, key):
+        from datetime import datetime, timedelta, timezone
+
+        if key in self.ages and self.ages[key] is None:
+            return None  # object with no LastModified at all
+        days = self.ages.get(key, 0)
+        return datetime.now(timezone.utc) - timedelta(days=days)
 
     def get_paginator(self, name):
         outer = self
@@ -40,11 +52,15 @@ class FakeS3:
                 if outer.fail_listing:
                     raise RuntimeError("AccessDenied: s3:ListBucket")
                 prefix = kwargs.get("Prefix") or ""
-                contents = [
-                    {"Key": k, "Size": len(v)}
-                    for k, v in outer.objects.items()
-                    if k.startswith(prefix)
-                ]
+                contents = []
+                for k, v in outer.objects.items():
+                    if not k.startswith(prefix):
+                        continue
+                    entry = {"Key": k, "Size": len(v)}
+                    modified = outer._modified(k)
+                    if modified is not None:
+                        entry["LastModified"] = modified
+                    contents.append(entry)
                 # Two pages, to exercise pagination.
                 yield {"Contents": contents[:1]}
                 yield {"Contents": contents[1:]}
@@ -56,8 +72,8 @@ class FakeS3:
         return {"Body": FakeBody(self.objects[Key])}
 
 
-def install_s3(monkeypatch, objects, fail_listing=False, bucket="my-lake", prefix=None):
-    fake = FakeS3(objects, fail_listing)
+def install_s3(monkeypatch, objects, fail_listing=False, bucket="my-lake", prefix=None, ages=None):
+    fake = FakeS3(objects, fail_listing, ages)
     mod = types.ModuleType("boto3")
     mod.client = lambda name: fake
     monkeypatch.setitem(sys.modules, "boto3", mod)
@@ -241,6 +257,68 @@ def test_download_failure_skips_that_file_only(monkeypatch):
     hits = datalake.scan_s3("XYZ", 5, 4000)
     assert len(hits) == 1
     assert "drilling" in hits[0]["source"]
+
+
+# ------------------------------------------------------- S3 age filter
+
+
+AGED = {
+    "notes/XYZ-today.md": b"XYZ placement announced today",
+    "notes/XYZ-lastmonth.md": b"XYZ old commentary",
+}
+
+
+def test_stale_objects_are_excluded(monkeypatch):
+    fake = install_s3(monkeypatch, AGED, ages={"notes/XYZ-lastmonth.md": 30})
+    hits = datalake.scan_s3("XYZ", 5, 4000, max_age_days=7)
+    assert [h["source"] for h in hits] == ["s3://my-lake/notes/XYZ-today.md"]
+    assert fake.downloaded == ["notes/XYZ-today.md"]
+
+
+def test_object_on_the_boundary_is_kept(monkeypatch):
+    install_s3(monkeypatch, AGED, ages={"notes/XYZ-lastmonth.md": 6})
+    assert len(datalake.scan_s3("XYZ", 5, 4000, max_age_days=7)) == 2
+
+
+def test_age_filter_off_by_zero(monkeypatch):
+    install_s3(monkeypatch, AGED, ages={"notes/XYZ-lastmonth.md": 30})
+    assert len(datalake.scan_s3("XYZ", 5, 4000, max_age_days=0)) == 2
+
+
+def test_object_without_a_date_is_kept(monkeypatch):
+    """Missing LastModified must not silently drop the note."""
+    install_s3(monkeypatch, AGED, ages={"notes/XYZ-lastmonth.md": None})
+    assert len(datalake.scan_s3("XYZ", 5, 4000, max_age_days=7)) == 2
+
+
+def test_age_is_part_of_the_cache_key(monkeypatch):
+    """Changing the window must re-list rather than reuse a differently-filtered one."""
+    fake = install_s3(monkeypatch, AGED, ages={"notes/XYZ-lastmonth.md": 30})
+    assert len(datalake.scan_s3("XYZ", 5, 4000, max_age_days=7)) == 1
+    assert len(datalake.scan_s3("XYZ", 5, 4000, max_age_days=0)) == 2
+    assert fake.list_calls == 2
+
+
+def test_age_filtered_listing_still_cached_across_tickers(monkeypatch):
+    fake = install_s3(monkeypatch, AGED, ages={"notes/XYZ-lastmonth.md": 30})
+    for ticker in ("XYZ", "ABC", "DEF"):
+        datalake.scan_s3(ticker, 5, 4000, max_age_days=7)
+    assert fake.list_calls == 1
+
+
+def test_gather_context_passes_the_age_window(monkeypatch, tmp_path):
+    fake = install_s3(monkeypatch, AGED, ages={"notes/XYZ-lastmonth.md": 30})
+    cfg = {
+        "datalake": {
+            "enabled": True,
+            "local_dir": "",
+            "max_files_per_ticker": 5,
+            "max_chars_per_file": 500,
+            "max_age_days": 7,
+        }
+    }
+    assert len(datalake.gather_context("XYZ", cfg)) == 1
+    assert fake.downloaded == ["notes/XYZ-today.md"]
 
 
 def test_gather_context_merges_s3_and_local(tmp_path, monkeypatch):
