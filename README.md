@@ -23,7 +23,7 @@ gh secret set SMTP_USER   --body "you@gmail.com"
 gh secret set SMTP_PASS   --body "your-gmail-app-password"
 gh secret set EMAIL_FROM  --body "you@gmail.com"
 gh secret set EMAIL_TO    --body "you@gmail.com"
-gh secret set ANTHROPIC_API_KEY --body "sk-ant-..."   # enables the AI "why it fell" analysis
+gh secret set OPENAI_API_KEY --body "sk-..."          # enables the AI "why it fell" analysis
 ```
 
 Optional S3 data-lake scan:
@@ -61,6 +61,15 @@ footer notes which sectors were muted so you always know the filter is live.
 Other knobs in the same file: `threshold_pct`, `min_market_cap_aud`,
 `max_stocks_in_email`, and AI/data-lake toggles.
 
+## Revenue screen
+
+`min_revenue_aud` (default `20000000`) limits the report to companies with at
+least that much trailing-twelve-month revenue. Most ASX stocks that fall hard in
+a single session are pre-revenue explorers, so this cuts the list a long way —
+set it to `0` to turn the screen off. Companies where Yahoo has no revenue figure
+are dropped by default; `include_unknown_revenue: true` keeps them. Whenever the
+screen hides anything the email says how many, so a short list is never silent.
+
 ## What the email looks like
 
 Each flagged stock gets a card: ticker + company name + sector, a red
@@ -74,8 +83,22 @@ quiet day you get a short "no falls beyond threshold" note instead.
 
 Two sources, both optional and merged:
 
-* **S3** — set the `DATALAKE_*` secrets; files whose key contains the ticker are
-  pulled (text formats, ≤2MB) and snippets fed to the AI.
+* **S3 (manifest index — the normal path)** — the lake written by
+  [market-ingestion](https://github.com/hdcapital/market-ingestion) keeps a
+  per-day index: `manifests/<market>/<YYYY-MM-DD>.jsonl`, one line per document
+  with its ticker, object key and admin-noise flag. The scanner reads the last
+  `max_age_days` of those (a handful of requests **no matter how big the lake
+  grows — it never lists the bucket**), matches fallers on the ticker field,
+  skips admin noise, and feeds each document's title + text to the AI.
+  Configure under `datalake.manifests` (`prefix`, `markets`). This matters
+  because document filenames in that lake are MD5 hashes — filename matching
+  finds nothing there.
+* **S3 (fallback walk)** — with `manifests.markets: []`, or when no manifest
+  exists in the bucket, the scanner walks the listing and matches tickers
+  against filenames (text formats, ≤2MB), fanned out in parallel across
+  top-level folders. This is O(bucket) and slows as the lake grows — the log
+  says `kept N of M object(s) … (mode)`; if you're stuck on this path at
+  scale, `DATALAKE_S3_PREFIX` is the lever.
 * **Local** — drop text/markdown notes into `datalake_sample/` (or repoint
   `datalake.local_dir` in config); any file mentioning the ticker is used.
 
@@ -85,12 +108,19 @@ Open the repo in Claude Code — `CLAUDE.md` tells it everything. Quick manual l
 
 ```bash
 pip install -r requirements.txt
-pytest -q                                # offline unit tests
+pytest -q                                # offline suite — no network, no secrets
 python -m src.main --dry-run --limit 60  # small live run → open out/report.html
 ```
+
+The suite fakes yfinance, `requests` and the OpenAI client (`tests/fakes.py`),
+so `tests/test_e2e.py` drives the whole universe → prices → filters →
+fundamentals → data lake → analysis → render path without egress. It also runs
+in CI on every push and as a gate before the daily scan sends anything.
 
 ## Caveats
 
 Prices come from Yahoo Finance and can occasionally lag or misprice illiquid
 micro-caps; fundamentals coverage is patchy for small resource explorers (fields
-show "—" when unavailable). Nothing here is financial advice.
+show "—" when unavailable). Stocks whose most recent Yahoo bar predates the
+latest session — halted or simply untraded names — are skipped rather than
+reported with a stale move. Nothing here is financial advice.
