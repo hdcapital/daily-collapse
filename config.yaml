@@ -1,0 +1,38 @@
+# ===== ASX Crash Scanner configuration =====
+
+# A stock is flagged when today's close is down MORE than this % vs the prior close.
+threshold_pct: 15.0
+
+# --- Sector exclusion feature ---
+# Flip `enabled: true` and list GICS industry groups to hide from the report.
+# Names must match the ASX directory's "GICs industry group" column, e.g.:
+#   Materials, Energy, Pharmaceuticals Biotechnology & Life Sciences,
+#   Software & Services, Banks, Real Estate, Capital Goods,
+#   Health Care Equipment & Services, Food Beverage & Tobacco,
+#   Diversified Financials, Media & Entertainment, Retailing, Utilities
+exclude_sectors:
+  enabled: false
+  sectors:
+    - Materials          # example: mute the flood of tiny explorers
+    - Energy
+
+# Ignore micro-caps below this market cap (AUD). 0 = no filter.
+min_market_cap_aud: 0
+
+# Safety valve: cap how many stocks get the full AI + fundamentals treatment
+# (on a bloodbath day the tail is truncated, worst falls first).
+max_stocks_in_email: 40
+
+# AI analysis of why each stock sold off (needs ANTHROPIC_API_KEY secret).
+ai_analysis:
+  enabled: true
+  model: claude-sonnet-4-6
+  max_web_searches_per_stock: 3
+
+# Data-lake scan: pulls text snippets mentioning the ticker from S3 (optional)
+# and/or a local folder, and feeds them to the AI as extra context.
+datalake:
+  enabled: true
+  local_dir: datalake_sample   # set to "" to disable local folder scan
+  max_files_per_ticker: 5
+  max_chars_per_file: 4000

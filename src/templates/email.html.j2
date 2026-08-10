@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASX Fall Wire — {{ report_date }}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#EEF1F4;">
+<!-- preheader -->
+<div style="display:none;max-height:0;overflow:hidden;">{{ fallers|length }} ASX stock{{ '' if fallers|length == 1 else 's' }} closed down more than {{ threshold }}% today. Worst: {{ worst_ticker }} {{ worst_pct }}.</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#EEF1F4;">
+<tr><td align="center" style="padding:24px 12px;">
+<table role="presentation" width="640" cellpadding="0" cellspacing="0" style="width:640px;max-width:100%;">
+
+  <!-- ===== Masthead ===== -->
+  <tr><td style="background-color:#171D26;border-radius:10px 10px 0 0;padding:28px 32px 22px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+      <td style="font-family:Georgia,'Times New Roman',serif;color:#FFFFFF;font-size:26px;letter-spacing:1px;">
+        ASX <span style="color:#F0475C;">FALL</span> WIRE
+      </td>
+      <td align="right" style="font-family:'SF Mono',Menlo,Consolas,monospace;color:#8B95A3;font-size:12px;">
+        {{ report_date }}<br>Sydney close
+      </td>
+    </tr></table>
+  </td></tr>
+
+  <!-- ===== Session summary strip ===== -->
+  <tr><td style="background-color:#1F2733;padding:14px 32px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+      <td style="font-family:'SF Mono',Menlo,Consolas,monospace;font-size:12px;color:#C6CDD6;">
+        <span style="color:#F0475C;font-size:16px;">{{ fallers|length }}</span> flagged &nbsp;·&nbsp; {{ scanned }} scanned &nbsp;·&nbsp; trigger &gt;{{ threshold }}% fall
+      </td>
+    </tr>
+    {% if excluded_note %}
+    <tr><td style="font-family:'SF Mono',Menlo,Consolas,monospace;font-size:11px;color:#8B95A3;padding-top:6px;">
+      sectors muted: {{ excluded_note }}
+    </td></tr>
+    {% endif %}
+    </table>
+  </td></tr>
+
+  {% if not fallers %}
+  <!-- ===== Quiet day ===== -->
+  <tr><td style="background-color:#FFFFFF;border-radius:0 0 10px 10px;padding:48px 32px;" align="center">
+    <div style="font-family:Georgia,serif;font-size:20px;color:#171D26;">A quiet close.</div>
+    <div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;font-size:14px;color:#64707E;padding-top:8px;">
+      No ASX-listed stock fell more than {{ threshold }}% today.
+    </div>
+  </td></tr>
+  {% endif %}
+
+  <!-- ===== Stock cards ===== -->
+  {% for s in fallers %}
+  <tr><td style="background-color:#FFFFFF;padding:26px 32px 24px;border-bottom:1px solid #E3E8ED;{% if loop.last %}border-radius:0 0 10px 10px;border-bottom:0;{% endif %}">
+
+    <!-- name row -->
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+      <td>
+        <span style="font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#FFFFFF;background-color:#171D26;padding:3px 8px;border-radius:4px;">{{ s.ticker }}</span>
+        <span style="font-family:Georgia,serif;font-size:18px;color:#171D26;padding-left:6px;">{{ s.name }}</span>
+      </td>
+      <td align="right" style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;font-size:11px;color:#64707E;white-space:nowrap;">{{ s.sector }}</td>
+    </tr></table>
+
+    <!-- drawdown gauge (signature element) -->
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;"><tr>
+      <td width="110" style="font-family:'SF Mono',Menlo,Consolas,monospace;font-size:24px;color:#D6273B;">{{ s.pct_str }}</td>
+      <td>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+          <td style="background-color:#F1E4E6;border-radius:3px;">
+            <table role="presentation" width="{{ s.bar_pct }}%" cellpadding="0" cellspacing="0"><tr>
+              <td style="background-color:#D6273B;height:8px;border-radius:3px;font-size:0;line-height:0;">&nbsp;</td>
+            </tr></table>
+          </td>
+        </tr></table>
+        <div style="font-family:'SF Mono',Menlo,Consolas,monospace;font-size:11px;color:#64707E;padding-top:5px;">
+          {{ s.prev_close_str }} &rarr; {{ s.close_str }} &nbsp;·&nbsp; vol {{ s.volume_str }}
+        </div>
+      </td>
+    </tr></table>
+
+    <!-- why it fell -->
+    <div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.55;color:#171D26;margin-top:14px;">
+      <span style="color:#D6273B;font-weight:600;">Why it fell&nbsp;</span>
+      <span style="font-size:10px;font-family:'SF Mono',Menlo,Consolas,monospace;color:#FFFFFF;background-color:{{ s.conf_color }};padding:2px 6px;border-radius:3px;vertical-align:1px;">{{ s.confidence|upper }}</span><br>
+      {{ s.reason }}
+    </div>
+
+    <!-- description -->
+    <div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;color:#64707E;margin-top:10px;">
+      {{ s.description }}
+    </div>
+
+    <!-- fundamentals -->
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;background-color:#F7F9FA;border-radius:6px;">
+      <tr>
+        {% for label, val in s.metrics %}
+        <td style="padding:10px 14px;" align="center">
+          <div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;font-size:10px;letter-spacing:0.8px;color:#8B95A3;">{{ label|upper }}</div>
+          <div style="font-family:'SF Mono',Menlo,Consolas,monospace;font-size:14px;color:#171D26;padding-top:3px;">{{ val }}</div>
+        </td>
+        {% endfor %}
+      </tr>
+    </table>
+
+    {% if s.lake_sources %}
+    <div style="font-family:'SF Mono',Menlo,Consolas,monospace;font-size:10px;color:#8B95A3;margin-top:8px;">
+      data lake: {{ s.lake_sources }}
+    </div>
+    {% endif %}
+  </td></tr>
+  {% endfor %}
+
+  <!-- ===== Footer ===== -->
+  <tr><td style="padding:18px 32px;" align="center">
+    <div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;font-size:11px;line-height:1.6;color:#8B95A3;">
+      Automated scan of the ASX official list · prices via Yahoo Finance and may lag or err ·
+      not financial advice. Adjust threshold &amp; sector filters in <span style="font-family:'SF Mono',Menlo,Consolas,monospace;">config.yaml</span>.
+    </div>
+  </td></tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>
