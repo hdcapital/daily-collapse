@@ -73,13 +73,31 @@ def build_context(
     }
 
 
+def _env(name: str, default: str | None = None) -> str | None:
+    """Environment lookup that treats a blank value as unset.
+
+    GitHub Actions exports an unset secret as an empty string rather than
+    omitting it, so `os.environ.get(name, fallback)` never reaches the fallback
+    and downstream code gets "" — an empty From header, or int("") for the port.
+    """
+    value = os.environ.get(name)
+    return value.strip() if value and value.strip() else default
+
+
+def _require(name: str) -> str:
+    value = _env(name)
+    if not value:
+        raise RuntimeError(f"{name} is not set — cannot send email")
+    return value
+
+
 def send(html: str, subject: str) -> None:
-    host = os.environ["SMTP_HOST"]
-    port = int(os.environ.get("SMTP_PORT", "587"))
-    user = os.environ["SMTP_USER"]
-    password = os.environ["SMTP_PASS"]
-    sender = os.environ.get("EMAIL_FROM", user)
-    to = [a.strip() for a in os.environ["EMAIL_TO"].split(",")]
+    host = _require("SMTP_HOST")
+    port = int(_env("SMTP_PORT", "587"))
+    user = _require("SMTP_USER")
+    password = _require("SMTP_PASS")
+    sender = _env("EMAIL_FROM") or user
+    to = [a.strip() for a in _require("EMAIL_TO").split(",") if a.strip()]
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject

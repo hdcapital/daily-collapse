@@ -175,6 +175,38 @@ def test_send_defaults_from_to_user(monkeypatch):
     assert FakeSMTP.last.sent[0] == "bot@example.com"
 
 
+def test_blank_email_from_falls_back_to_user(monkeypatch):
+    """An unset GitHub secret arrives as "" — that must not become the From header."""
+    _smtp_env(monkeypatch, EMAIL_FROM="")
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    emailer.send("<p>hi</p>", "s")
+    sender, _, body = FakeSMTP.last.sent
+    assert sender == "bot@example.com"
+    assert "From: bot@example.com" in body
+
+
+def test_blank_smtp_port_falls_back_to_587(monkeypatch):
+    """int("") would raise; a blank port must fall back to the default."""
+    _smtp_env(monkeypatch, SMTP_PORT="")
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    emailer.send("<p>hi</p>", "s")
+    assert FakeSMTP.last.port == 587
+
+
+def test_blank_required_secret_raises_clearly(monkeypatch):
+    _smtp_env(monkeypatch, SMTP_PASS="")
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    with pytest.raises(RuntimeError, match="SMTP_PASS is not set"):
+        emailer.send("<p>hi</p>", "s")
+
+
+def test_recipients_are_trimmed_of_blanks(monkeypatch):
+    _smtp_env(monkeypatch, EMAIL_TO="a@example.com, ,b@example.com,")
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    emailer.send("<p>hi</p>", "s")
+    assert FakeSMTP.last.sent[1] == ["a@example.com", "b@example.com"]
+
+
 def test_send_is_multipart_alternative(monkeypatch):
     _smtp_env(monkeypatch)
     monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
