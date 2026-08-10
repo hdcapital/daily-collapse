@@ -1,5 +1,72 @@
 """Data-lake context scan tests."""
+import sys
+import types
+
+import pytest
+
 from src import datalake
+
+
+@pytest.fixture(autouse=True)
+def _clear_s3_cache():
+    datalake.reset_s3_cache()
+    yield
+    datalake.reset_s3_cache()
+
+
+class FakeBody:
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def read(self, n=None):
+        return self._data[:n] if n else self._data
+
+
+class FakeS3:
+    """Records how often the bucket is listed and which keys are downloaded."""
+
+    def __init__(self, objects: dict[str, bytes], fail_listing: bool = False):
+        self.objects = objects
+        self.fail_listing = fail_listing
+        self.list_calls = 0
+        self.downloaded: list[str] = []
+
+    def get_paginator(self, name):
+        outer = self
+
+        class _P:
+            def paginate(self, **kwargs):
+                outer.list_calls += 1
+                if outer.fail_listing:
+                    raise RuntimeError("AccessDenied: s3:ListBucket")
+                prefix = kwargs.get("Prefix") or ""
+                contents = [
+                    {"Key": k, "Size": len(v)}
+                    for k, v in outer.objects.items()
+                    if k.startswith(prefix)
+                ]
+                # Two pages, to exercise pagination.
+                yield {"Contents": contents[:1]}
+                yield {"Contents": contents[1:]}
+
+        return _P()
+
+    def get_object(self, Bucket, Key):  # noqa: N803 - mirrors boto3's API
+        self.downloaded.append(Key)
+        return {"Body": FakeBody(self.objects[Key])}
+
+
+def install_s3(monkeypatch, objects, fail_listing=False, bucket="my-lake", prefix=None):
+    fake = FakeS3(objects, fail_listing)
+    mod = types.ModuleType("boto3")
+    mod.client = lambda name: fake
+    monkeypatch.setitem(sys.modules, "boto3", mod)
+    monkeypatch.setenv("DATALAKE_S3_BUCKET", bucket)
+    if prefix is None:
+        monkeypatch.delenv("DATALAKE_S3_PREFIX", raising=False)
+    else:
+        monkeypatch.setenv("DATALAKE_S3_PREFIX", prefix)
+    return fake
 
 
 def _write(tmp_path, name, text):
@@ -82,3 +149,111 @@ def test_gather_context_local(tmp_path):
 def test_s3_disabled_without_bucket(monkeypatch):
     monkeypatch.delenv("DATALAKE_S3_BUCKET", raising=False)
     assert datalake.scan_s3("XYZ", 5, 4000) == []
+
+
+# --------------------------------------------------------------- S3 scanning
+
+
+OBJECTS = {
+    "notes/XYZ-placement.md": b"XYZ raised at a 25% discount",
+    "notes/ABC-note.md": b"ABC is unrelated",
+    "notes/XYZ-drilling.txt": b"XYZ hit 12m at 3.1 g/t",
+    "notes/scan.pdf": b"XYZ mentioned but wrong format",
+}
+
+
+def test_bucket_is_listed_once_across_many_tickers(monkeypatch):
+    """The whole point of the fix: one listing per run, not one per stock."""
+    fake = install_s3(monkeypatch, OBJECTS)
+    for ticker in ("XYZ", "ABC", "DEF", "GHI", "JKL"):
+        datalake.scan_s3(ticker, 5, 4000)
+    assert fake.list_calls == 1
+
+
+def test_only_matching_objects_are_downloaded(monkeypatch):
+    fake = install_s3(monkeypatch, OBJECTS)
+    hits = datalake.scan_s3("XYZ", 5, 4000)
+    assert sorted(fake.downloaded) == ["notes/XYZ-drilling.txt", "notes/XYZ-placement.md"]
+    assert len(hits) == 2
+    assert hits[0]["source"].startswith("s3://my-lake/")
+    assert "25% discount" in hits[0]["text"]
+
+
+def test_unmatched_ticker_downloads_nothing(monkeypatch):
+    fake = install_s3(monkeypatch, OBJECTS)
+    assert datalake.scan_s3("ZZZ", 5, 4000) == []
+    assert fake.downloaded == []
+
+
+def test_non_text_extensions_skipped(monkeypatch):
+    fake = install_s3(monkeypatch, OBJECTS)
+    datalake.scan_s3("XYZ", 5, 4000)
+    assert "notes/scan.pdf" not in fake.downloaded
+
+
+def test_oversized_objects_skipped(monkeypatch):
+    fake = install_s3(monkeypatch, {"notes/XYZ-big.md": b"x" * 2_000_001})
+    assert datalake.scan_s3("XYZ", 5, 4000) == []
+    assert fake.downloaded == []
+
+
+def test_s3_respects_max_files(monkeypatch):
+    objs = {f"notes/XYZ-{i}.md": b"XYZ mentioned" for i in range(10)}
+    fake = install_s3(monkeypatch, objs)
+    assert len(datalake.scan_s3("XYZ", 3, 4000)) == 3
+    assert len(fake.downloaded) == 3
+
+
+def test_s3_zero_budget_skips_entirely(monkeypatch):
+    fake = install_s3(monkeypatch, OBJECTS)
+    assert datalake.scan_s3("XYZ", 0, 4000) == []
+    assert fake.list_calls == 0
+
+
+def test_listing_failure_is_reported_once(monkeypatch, caplog):
+    """A permissions error must not produce one warning per stock."""
+    fake = install_s3(monkeypatch, OBJECTS, fail_listing=True)
+    with caplog.at_level("WARNING"):
+        for ticker in ("XYZ", "ABC", "DEF"):
+            assert datalake.scan_s3(ticker, 5, 4000) == []
+    assert fake.list_calls == 1
+    assert sum("listing failed" in r.message for r in caplog.records) == 1
+
+
+def test_prefix_narrows_the_listing(monkeypatch):
+    objs = dict(OBJECTS)
+    objs["archive/XYZ-old.md"] = b"XYZ ancient history"
+    fake = install_s3(monkeypatch, objs, prefix="notes/")
+    datalake.scan_s3("XYZ", 5, 4000)
+    assert "archive/XYZ-old.md" not in fake.downloaded
+
+
+def test_download_failure_skips_that_file_only(monkeypatch):
+    fake = install_s3(monkeypatch, OBJECTS)
+    original = fake.get_object
+
+    def flaky(Bucket, Key):  # noqa: N803
+        if Key.endswith("placement.md"):
+            raise RuntimeError("transient S3 error")
+        return original(Bucket=Bucket, Key=Key)
+
+    fake.get_object = flaky
+    hits = datalake.scan_s3("XYZ", 5, 4000)
+    assert len(hits) == 1
+    assert "drilling" in hits[0]["source"]
+
+
+def test_gather_context_merges_s3_and_local(tmp_path, monkeypatch):
+    install_s3(monkeypatch, OBJECTS)
+    _write(tmp_path, "local-note.md", "XYZ local memo")
+    cfg = {
+        "datalake": {
+            "enabled": True,
+            "local_dir": str(tmp_path),
+            "max_files_per_ticker": 5,
+            "max_chars_per_file": 500,
+        }
+    }
+    sources = [h["source"] for h in datalake.gather_context("XYZ", cfg)]
+    assert any(s.startswith("s3://") for s in sources)
+    assert any(s.startswith("local:") for s in sources)

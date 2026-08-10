@@ -43,6 +43,9 @@ Everything degrades gracefully when a secret is missing — the run still produc
   newest bar in the batch are dropped, so a halted stock can't report a week-old fall.
 - `find_fallers` is strict (`< -threshold`), matching "more than X%" in the config,
   README and email copy.
+- `datalake` lists the S3 bucket **once per process** (`_listing_cache`) and reuses it
+  for every ticker; listing per ticker made the lake scan dominate run time (~25s ×
+  40 stocks). Keep any new S3 code path going through `_bucket_listing`.
 - Email HTML is autoescaped — `select_autoescape` must keep matching the `.j2`
   suffix, or AI/web-search text can inject markup into the report.
 - Email HTML must stay table-based with inline styles (Gmail/Outlook strip <style>).

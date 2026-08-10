@@ -56,31 +56,89 @@ def scan_local(ticker: str, root: str, max_files: int, max_chars: int) -> list[d
     return hits
 
 
+MAX_KEYS_INDEXED = 100_000  # guard against an unbounded bucket listing
+
+# The bucket is listed once per process and reused for every ticker. Listing it
+# per ticker meant a full pass over the lake for each flagged stock — with 30
+# stocks that was 30 identical passes, and it dominated the run time.
+_listing_cache: dict[tuple[str, str], list[tuple[str, int]]] = {}
+_client_cache: list = []
+
+
+def reset_s3_cache() -> None:
+    """Drop the cached listing and client (used by tests)."""
+    _listing_cache.clear()
+    _client_cache.clear()
+
+
+def _s3_client():
+    if not _client_cache:
+        import boto3
+
+        _client_cache.append(boto3.client("s3"))
+    return _client_cache[0]
+
+
+def _bucket_listing(s3, bucket: str, prefix: str) -> list[tuple[str, int]]:
+    """(key, size) for every object under prefix — fetched once, then cached.
+
+    A failure is cached too, so a permissions problem is reported once rather
+    than once per ticker.
+    """
+    cache_key = (bucket, prefix)
+    if cache_key in _listing_cache:
+        return _listing_cache[cache_key]
+
+    keys: list[tuple[str, int]] = []
+    capped = False
+    try:
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                keys.append((obj["Key"], obj["Size"]))
+            if len(keys) >= MAX_KEYS_INDEXED:
+                capped = True
+                break
+        if capped:
+            log.warning(
+                "Data lake listing capped at %d objects — set DATALAKE_S3_PREFIX to narrow the scan",
+                MAX_KEYS_INDEXED,
+            )
+        log.info("Data lake: indexed %d object(s) from s3://%s/%s", len(keys), bucket, prefix)
+    except Exception as e:  # noqa: BLE001
+        log.warning("S3 data-lake listing failed — S3 context skipped for this run: %s", e)
+        keys = []
+
+    _listing_cache[cache_key] = keys
+    return keys
+
+
 def scan_s3(ticker: str, max_files: int, max_chars: int) -> list[dict]:
     bucket = os.environ.get("DATALAKE_S3_BUCKET")
-    if not bucket:
+    if not bucket or max_files <= 0:
         return []
     prefix = os.environ.get("DATALAKE_S3_PREFIX", "")
     hits: list[dict] = []
     try:
-        import boto3
-
-        s3 = boto3.client("s3")
-        paginator = s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-            for obj in page.get("Contents", []):
-                if len(hits) >= max_files:
-                    return hits
-                key = obj["Key"]
-                if Path(key).suffix.lower() not in TEXT_EXT or obj["Size"] > 2_000_000:
-                    continue
-                if not _in_name(ticker, key):
-                    continue  # cheap pass: key match only, to avoid downloading the lake
-                body = s3.get_object(Bucket=bucket, Key=key)["Body"].read(200_000)
-                text = body.decode(errors="ignore")
-                hits.append({"source": f"s3://{bucket}/{key}", "text": _snippet_around(text, ticker, max_chars)})
+        s3 = _s3_client()
     except Exception as e:  # noqa: BLE001
-        log.warning("S3 data-lake scan failed: %s", e)
+        log.warning("S3 data-lake client unavailable: %s", e)
+        return []
+
+    for key, size in _bucket_listing(s3, bucket, prefix):
+        if len(hits) >= max_files:
+            break
+        if Path(key).suffix.lower() not in TEXT_EXT or size > 2_000_000:
+            continue
+        if not _in_name(ticker, key):
+            continue  # cheap pass: key match only, to avoid downloading the lake
+        try:
+            body = s3.get_object(Bucket=bucket, Key=key)["Body"].read(200_000)
+        except Exception as e:  # noqa: BLE001
+            log.warning("S3 data-lake read failed for %s: %s", key, e)
+            continue
+        text = body.decode(errors="ignore")
+        hits.append({"source": f"s3://{bucket}/{key}", "text": _snippet_around(text, ticker, max_chars)})
     return hits
 
 
