@@ -385,4 +385,8 @@ def gather_context(ticker: str, cfg: dict) -> list[dict]:
     max_age_days = int(dl.get("max_age_days", 0) or 0)
     hits = scan_s3(ticker, max_files, max_chars, max_age_days, dl.get("manifests"))
     hits += scan_local(ticker, dl.get("local_dir", ""), max(0, max_files - len(hits)), max_chars)
+    # Per-ticker, because the index summary alone can't tell you whether the
+    # documents actually reached the AI. A run of zeros across every stock means
+    # the lake is connected but contributing nothing.
+    log.info("Data lake: %d document(s) for %s", len(hits), ticker)
     return hits
