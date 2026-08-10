@@ -19,6 +19,7 @@ class Fundamentals:
     ev_ebit: float | None = None
     summary: str = ""
     website: str = ""
+    financial_currency: str = ""
     raw: dict = field(default_factory=dict)
 
 
@@ -50,6 +51,7 @@ def get_fundamentals(ticker: str) -> Fundamentals:
         f.revenue = info.get("totalRevenue")
         f.summary = (info.get("longBusinessSummary") or "").strip()
         f.website = info.get("website") or ""
+        f.financial_currency = (info.get("financialCurrency") or "").strip().upper()
         f.ebit = _ebit_from_statements(t)
 
         ev = f.enterprise_value

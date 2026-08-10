@@ -44,6 +44,8 @@ def build_context(
     excluded: list[str],
     report_date: str,
     total_fallers: int | None = None,
+    hidden_by_revenue: int = 0,
+    min_revenue: float = 0.0,
 ) -> dict:
     """Shape the render context. `rows` is copied, not mutated.
 
@@ -70,6 +72,11 @@ def build_context(
         "worst_pct": worst["pct_str"] if worst else "—",
         "total_fallers": total,
         "truncated": max(0, total - len(fallers)),
+        "revenue_note": (
+            f"revenue screen: {hidden_by_revenue} hidden below ${min_revenue / 1e6:,.0f}M"
+            if hidden_by_revenue and min_revenue > 0
+            else ""
+        ),
     }
 
 

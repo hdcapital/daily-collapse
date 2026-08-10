@@ -19,6 +19,15 @@ exclude_sectors:
 # Ignore micro-caps below this market cap (AUD). 0 = no filter.
 min_market_cap_aud: 0
 
+# Only report companies whose trailing-twelve-month revenue is at least this
+# (AUD). 0 = no filter. Most ASX stocks that fall hard in a day are pre-revenue
+# explorers, so switching this on shrinks the report a long way.
+min_revenue_aud: 20000000
+# Yahoo has no revenue figure for some companies. When the screen is on they are
+# dropped by default — you cannot show a stock is above the bar without a number.
+# Set true to keep them instead.
+include_unknown_revenue: false
+
 # Safety valve: cap how many stocks get the full AI + fundamentals treatment
 # (on a bloodbath day the tail is truncated, worst falls first).
 max_stocks_in_email: 40

@@ -3,7 +3,7 @@ import pandas as pd
 
 from src.emailer import build_context, render
 from src.fundamentals import Fundamentals, fmt_money, fmt_ratio
-from src.main import apply_filters
+from src.main import apply_filters, screen_by_revenue
 from src.prices import find_fallers
 
 
@@ -52,6 +52,45 @@ def test_min_market_cap():
     cfg = {"exclude_sectors": {"enabled": False, "sectors": []}, "min_market_cap_aud": 1e8}
     filtered, _ = apply_filters(find_fallers(_moves(), 15.0), _universe(), cfg)
     assert list(filtered["ticker"]) == ["BBB"]
+
+
+def _cand(ticker, revenue, currency="AUD"):
+    return ({"ticker": ticker}, Fundamentals(revenue=revenue, financial_currency=currency))
+
+
+def test_revenue_screen_keeps_at_or_above_threshold():
+    cands = [_cand("AAA", 25e6), _cand("BBB", 20e6), _cand("CCC", 19_999_999)]
+    kept, hidden = screen_by_revenue(cands, {"min_revenue_aud": 20e6})
+    assert [row["ticker"] for row, _ in kept] == ["AAA", "BBB"]
+    assert hidden == 1
+
+
+def test_revenue_screen_drops_unknown_by_default():
+    kept, hidden = screen_by_revenue([_cand("AAA", None)], {"min_revenue_aud": 20e6})
+    assert kept == [] and hidden == 1
+
+
+def test_revenue_screen_can_keep_unknown():
+    cfg = {"min_revenue_aud": 20e6, "include_unknown_revenue": True}
+    kept, hidden = screen_by_revenue([_cand("AAA", None)], cfg)
+    assert len(kept) == 1 and hidden == 0
+
+
+def test_revenue_screen_disabled_by_zero():
+    cands = [_cand("AAA", 1.0), _cand("BBB", None)]
+    kept, hidden = screen_by_revenue(cands, {"min_revenue_aud": 0})
+    assert kept == cands and hidden == 0
+
+
+def test_revenue_screen_compares_foreign_currency_unconverted():
+    """A USD reporter is compared on the raw figure — noted, not silently converted."""
+    kept, hidden = screen_by_revenue([_cand("AAA", 25e6, "USD")], {"min_revenue_aud": 20e6})
+    assert len(kept) == 1 and hidden == 0
+
+
+def test_revenue_screen_handles_zero_revenue():
+    kept, hidden = screen_by_revenue([_cand("AAA", 0.0)], {"min_revenue_aud": 20e6})
+    assert kept == [] and hidden == 1
 
 
 def test_ratio_formatting():

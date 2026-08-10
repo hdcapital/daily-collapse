@@ -40,13 +40,19 @@ HISTORIES = {
 
 INFOS = {
     "AAA.AX": {
-        "marketCap": 40_000_000,
-        "enterpriseValue": 35_000_000,
-        "totalRevenue": 7_000_000,
+        "marketCap": 200_000_000,
+        "enterpriseValue": 250_000_000,
+        "totalRevenue": 50_000_000,
+        "financialCurrency": "AUD",
         "longBusinessSummary": "Alpha Ltd explores for gold in Western Australia.",
         "website": "https://alpha.example.com",
     },
-    "BBB.AX": {"marketCap": 168_000_000, "longBusinessSummary": "Beta Ltd sells software."},
+    "BBB.AX": {
+        "marketCap": 168_000_000,
+        "totalRevenue": 30_000_000,
+        "financialCurrency": "AUD",
+        "longBusinessSummary": "Beta Ltd sells software.",
+    },
 }
 
 
@@ -74,8 +80,8 @@ def test_dry_run_writes_report(offline, monkeypatch):
     assert "Gamma Ltd" not in html and "Delta Ltd" not in html
     assert html.index("Alpha Ltd") < html.index("Beta Ltd")
     # Fundamentals came through yfinance info.
-    assert "$40.0M" in html  # market cap
-    assert "5.0×" in html  # EV / Rev = 35M / 7M
+    assert "$200.0M" in html  # market cap
+    assert "5.0×" in html  # EV / Rev = 250M / 50M
     # Degraded AI (no key) still yields a description from the Yahoo summary.
     assert "explores for gold" in html.lower()
     assert "500,000" in html  # volume formatting
@@ -202,6 +208,78 @@ def test_datalake_context_reaches_the_report(offline, monkeypatch, tmp_path):
     monkeypatch.setattr(main, "load_config", lambda: cfg)
     assert _run(monkeypatch, ["--dry-run"]) == 0
     assert "alpha-note.md" in (main.Path("out") / "report.html").read_text()
+
+
+def test_revenue_screen_hides_small_and_unknown(offline, monkeypatch):
+    """Below-threshold and no-revenue names drop out, and the email says so."""
+    infos = dict(INFOS)
+    infos["AAA.AX"] = dict(INFOS["AAA.AX"], totalRevenue=1_000_000)  # below the bar
+    infos["BBB.AX"] = {k: v for k, v in INFOS["BBB.AX"].items() if k != "totalRevenue"}
+    install_yf(monkeypatch, HISTORIES, infos)
+    assert _run(monkeypatch, ["--dry-run"]) == 0
+    html = (main.Path("out") / "report.html").read_text()
+    assert "Alpha Ltd" not in html and "Beta Ltd" not in html
+    assert "A quiet close." in html
+    assert "revenue screen: 2 hidden below $20M" in html
+
+
+def test_revenue_screen_keeps_unknown_when_configured(offline, monkeypatch):
+    infos = dict(INFOS)
+    infos["BBB.AX"] = {k: v for k, v in INFOS["BBB.AX"].items() if k != "totalRevenue"}
+    install_yf(monkeypatch, HISTORIES, infos)
+    cfg = dict(main.load_config())
+    cfg["include_unknown_revenue"] = True
+    monkeypatch.setattr(main, "load_config", lambda: cfg)
+    assert _run(monkeypatch, ["--dry-run"]) == 0
+    assert "Beta Ltd" in (main.Path("out") / "report.html").read_text()
+
+
+def test_revenue_screen_off_by_zero(offline, monkeypatch):
+    infos = dict(INFOS)
+    infos["AAA.AX"] = dict(INFOS["AAA.AX"], totalRevenue=1_000_000)
+    install_yf(monkeypatch, HISTORIES, infos)
+    cfg = dict(main.load_config())
+    cfg["min_revenue_aud"] = 0
+    monkeypatch.setattr(main, "load_config", lambda: cfg)
+    assert _run(monkeypatch, ["--dry-run"]) == 0
+    html = (main.Path("out") / "report.html").read_text()
+    assert "Alpha Ltd" in html
+    assert "revenue screen" not in html
+
+
+def test_screened_stocks_cost_no_ai_calls(offline, monkeypatch):
+    """The screen must run before enrichment, or it wastes money on dropped names."""
+    import types
+
+    calls = []
+
+    class Resp:
+        output_text = '{"reason":"x","confidence":"low","description":"y"}'
+
+    class FakeOpenAI:
+        def __init__(self, *a, **k):
+            pass
+
+        @property
+        def responses(self):
+            class _R:
+                def create(self, **kwargs):
+                    calls.append(kwargs)
+                    return Resp()
+
+            return _R()
+
+    mod = types.ModuleType("openai")
+    mod.OpenAI = FakeOpenAI
+    mod.BadRequestError = type("BadRequestError", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "openai", mod)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    infos = dict(INFOS)
+    infos["AAA.AX"] = dict(INFOS["AAA.AX"], totalRevenue=1_000_000)  # screened out
+    install_yf(monkeypatch, HISTORIES, infos)
+    assert _run(monkeypatch, ["--dry-run"]) == 0
+    assert len(calls) == 1  # only Beta survived, so only one AI call
 
 
 def test_config_file_is_valid():

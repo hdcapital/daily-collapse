@@ -51,10 +51,48 @@ def apply_filters(fallers, uni, cfg):
     return merged.reset_index(drop=True), excluded
 
 
-def enrich(row, cfg) -> dict:
+def screen_by_revenue(candidates: list[tuple], cfg: dict) -> tuple[list[tuple], int]:
+    """Drop fallers whose revenue is below `min_revenue_aud`.
+
+    `candidates` is [(row, Fundamentals)]. Returns the survivors and how many
+    were hidden, so the email can disclose the screen rather than silently
+    showing a shorter list.
+    """
+    min_rev = float(cfg.get("min_revenue_aud", 0) or 0)
+    if min_rev <= 0:
+        return candidates, 0
+
+    include_unknown = bool(cfg.get("include_unknown_revenue", False))
+    kept, hidden = [], 0
+    for row, f in candidates:
+        if f.revenue is None:
+            if include_unknown:
+                kept.append((row, f))
+            else:
+                hidden += 1
+                log.info("%s hidden: no revenue figure available", row["ticker"])
+            continue
+        # Yahoo reports in the company's own reporting currency. Nearly all ASX
+        # names report AUD; the few that don't are compared on the raw figure,
+        # which is noted rather than silently converted.
+        if f.financial_currency and f.financial_currency != "AUD":
+            log.info(
+                "%s reports revenue in %s — compared against the AUD threshold unconverted",
+                row["ticker"],
+                f.financial_currency,
+            )
+        if f.revenue >= min_rev:
+            kept.append((row, f))
+        else:
+            hidden += 1
+    if hidden:
+        log.info("Revenue screen hid %d stock(s) below $%.1fM", hidden, min_rev / 1e6)
+    return kept, hidden
+
+
+def enrich(row, f, cfg) -> dict:
     t = row["ticker"]
     log.info("Enriching %s (%.1f%%)", t, row["pct_change"])
-    f = get_fundamentals(t)
     lake = datalake.gather_context(t, cfg)
     a = analysis.analyse(
         ticker=t,
@@ -107,13 +145,19 @@ def main() -> int:
     log.info("%d fallers beyond -%s%%", len(fallers), cfg["threshold_pct"])
 
     filtered, excluded = apply_filters(fallers, uni, cfg)
-    total_fallers = len(filtered)
+
+    # Fundamentals are fetched before the revenue screen and the cap, so the AI
+    # calls (the expensive part) are only spent on stocks that survive both.
+    log.info("Fetching fundamentals for %d candidate(s)", len(filtered))
+    candidates = [(row, get_fundamentals(row["ticker"])) for _, row in filtered.iterrows()]
+    candidates, hidden_by_revenue = screen_by_revenue(candidates, cfg)
+
+    total_fallers = len(candidates)
     cap = int(cfg.get("max_stocks_in_email", 40))
     if total_fallers > cap:
         log.info("Capping the report at %d of %d flagged stocks (worst first)", cap, total_fallers)
-    filtered = filtered.head(cap)
 
-    rows = [enrich(r, cfg) for _, r in filtered.iterrows()]
+    rows = [enrich(row, f, cfg) for row, f in candidates[:cap]]
 
     ctx = emailer.build_context(
         rows,
@@ -122,6 +166,8 @@ def main() -> int:
         excluded=excluded,
         report_date=report_date,
         total_fallers=total_fallers,
+        hidden_by_revenue=hidden_by_revenue,
+        min_revenue=float(cfg.get("min_revenue_aud", 0) or 0),
     )
     html = emailer.render(ctx)
 

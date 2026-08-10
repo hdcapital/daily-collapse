@@ -37,6 +37,11 @@
       sectors muted: {{ excluded_note }}
     </td></tr>
     {% endif %}
+    {% if revenue_note %}
+    <tr><td style="font-family:'SF Mono',Menlo,Consolas,monospace;font-size:11px;color:#8B95A3;padding-top:6px;">
+      {{ revenue_note }}
+    </td></tr>
+    {% endif %}
     {% if truncated %}
     <tr><td style="font-family:'SF Mono',Menlo,Consolas,monospace;font-size:11px;color:#E0A030;padding-top:6px;">
       showing the {{ fallers|length }} worst of {{ total_fallers }} &mdash; {{ truncated }} more not detailed

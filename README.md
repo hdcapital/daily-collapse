@@ -61,6 +61,15 @@ footer notes which sectors were muted so you always know the filter is live.
 Other knobs in the same file: `threshold_pct`, `min_market_cap_aud`,
 `max_stocks_in_email`, and AI/data-lake toggles.
 
+## Revenue screen
+
+`min_revenue_aud` (default `20000000`) limits the report to companies with at
+least that much trailing-twelve-month revenue. Most ASX stocks that fall hard in
+a single session are pre-revenue explorers, so this cuts the list a long way —
+set it to `0` to turn the screen off. Companies where Yahoo has no revenue figure
+are dropped by default; `include_unknown_revenue: true` keeps them. Whenever the
+screen hides anything the email says how many, so a short list is never silent.
+
 ## What the email looks like
 
 Each flagged stock gets a card: ticker + company name + sector, a red

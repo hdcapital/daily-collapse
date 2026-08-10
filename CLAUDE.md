@@ -12,7 +12,7 @@ AI web-search analysis) → send a styled HTML email.
 - `src/datalake.py` — S3 + local-folder context scan
 - `src/analysis.py` — OpenAI Responses API (web_search tool) "why did it fall"
 - `src/emailer.py` + `src/templates/email.html.j2` — report render + SMTP
-- `config.yaml` — threshold, sector exclusions, caps
+- `config.yaml` — threshold, sector exclusions, revenue screen, caps
 - `.github/workflows/daily-scan.yml` — cron 08:30 UTC Mon–Fri
 
 ## Test commands
@@ -43,6 +43,9 @@ Everything degrades gracefully when a secret is missing — the run still produc
   newest bar in the batch are dropped, so a halted stock can't report a week-old fall.
 - `find_fallers` is strict (`< -threshold`), matching "more than X%" in the config,
   README and email copy.
+- Fundamentals are fetched in `main.main` *before* `screen_by_revenue` and the cap,
+  so AI calls are only spent on stocks that survive both. Don't move the
+  `get_fundamentals` call back inside `enrich`.
 - `datalake` lists the S3 bucket **once per process** (`_listing_cache`) and reuses it
   for every ticker; listing per ticker made the lake scan dominate run time (~25s ×
   40 stocks). Keep any new S3 code path going through `_bucket_listing`.
