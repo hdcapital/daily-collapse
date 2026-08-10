@@ -1,0 +1,60 @@
+name: ASX Daily Crash Scan
+
+on:
+  schedule:
+    # 08:30 UTC = 6:30pm AEST (winter) / 7:30pm AEDT (summer).
+    # ASX closes 4:00pm Sydney; closing auction settles ~4:12pm, so data is final by then.
+    - cron: "30 8 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (render HTML artifact, don't send email)"
+        type: boolean
+        default: false
+      limit:
+        description: "Limit universe size (for fast testing, 0 = full)"
+        default: "0"
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scan
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          # Optional data-lake (S3) credentials — leave unset to skip the lake scan
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          DATALAKE_S3_BUCKET: ${{ secrets.DATALAKE_S3_BUCKET }}
+          DATALAKE_S3_PREFIX: ${{ secrets.DATALAKE_S3_PREFIX }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ "${{ inputs.limit }}" != "0" ] && [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+          python -m src.main $ARGS
+
+      - name: Upload rendered report (always, for inspection)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: out/
+          if-no-files-found: ignore
