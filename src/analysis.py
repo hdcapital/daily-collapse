@@ -1,16 +1,18 @@
-"""Ask Claude (with web search) why a stock sold off, blending data-lake context."""
+"""Ask an OpenAI model (with web search) why a stock sold off, blending data-lake context.
+
+Uses the Responses API: the `web_search` built-in tool runs server-side, so a
+single call covers search + reasoning + the JSON answer. Needs OPENAI_API_KEY.
+"""
 from __future__ import annotations
 
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
-MAX_CONTINUATIONS = 4  # guards against a pause_turn loop that never settles
-VALID_CONFIDENCE = {"high", "medium", "low", "none-found"}
+VALID_CONFIDENCE = ["high", "medium", "low", "none-found"]
 
 SYSTEM = (
     "You are an equity analyst covering the ASX. Be factual and terse. "
@@ -20,6 +22,19 @@ SYSTEM = (
     "confidence (one of: high, medium, low, none-found), "
     "description (string, <=30 words, plain-English what the company does)."
 )
+
+# Structured Outputs schema — strict mode requires every property to be listed
+# in `required` and `additionalProperties: false`.
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reason": {"type": "string", "description": "Why the stock fell today, <=60 words."},
+        "confidence": {"type": "string", "enum": VALID_CONFIDENCE},
+        "description": {"type": "string", "description": "What the company does, <=30 words."},
+    },
+    "required": ["reason", "confidence", "description"],
+    "additionalProperties": False,
+}
 
 
 @dataclass
@@ -39,12 +54,12 @@ def analyse(
     cfg: dict,
 ) -> Analysis:
     ai = cfg.get("ai_analysis", {})
-    if not ai.get("enabled", True) or not os.environ.get("ANTHROPIC_API_KEY"):
+    if not ai.get("enabled", True) or not os.environ.get("OPENAI_API_KEY"):
         return Analysis(description=_shorten(yf_summary))
     try:
-        import anthropic
+        import openai
 
-        client = anthropic.Anthropic()
+        client = openai.OpenAI()
         lake = "\n\n".join(f"[{h['source']}]\n{h['text']}" for h in lake_context) or "(no data-lake hits)"
         prompt = (
             f"{name} (ASX:{ticker}) closed down {pct_change:.1f}% on {date}.\n\n"
@@ -54,45 +69,63 @@ def analyse(
             "raisings, downgrades, drill results or news explaining the fall, then "
             "answer in the required JSON."
         )
-        request = dict(
-            model=ai.get("model", "claude-sonnet-4-6"),
-            max_tokens=800,
-            system=SYSTEM,
-            tools=[
-                {
-                    "type": "web_search_20250305",
-                    "name": "web_search",
-                    "max_uses": int(ai.get("max_web_searches_per_stock", 3)),
-                }
-            ],
-        )
-        messages = [{"role": "user", "content": prompt}]
-        text = ""
-        # The server-side web-search loop can stop with `pause_turn` before it has
-        # written an answer; re-sending the turn resumes it where it left off.
-        for _ in range(MAX_CONTINUATIONS):
-            msg = client.messages.create(messages=messages, **request)
-            text += "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
-            if getattr(msg, "stop_reason", None) != "pause_turn":
-                break
-            messages = [
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": msg.content},
-            ]
-        else:
-            log.warning("AI analysis for %s still paused after %d turns", ticker, MAX_CONTINUATIONS)
+        model = ai.get("model", "gpt-5.6-terra")
+        text = _request(client, model, prompt, ai)
         return _parse(text, yf_summary)
     except Exception as e:  # noqa: BLE001
         log.warning("AI analysis failed for %s: %s", ticker, e)
         return Analysis(description=_shorten(yf_summary))
 
 
+def _request(client, model: str, prompt: str, ai: dict) -> str:
+    """One Responses call with web search + structured output.
+
+    Falls back to a plain request if the model rejects the optional features,
+    so a model that lacks web search or Structured Outputs still returns
+    something usable rather than nothing.
+    """
+    import openai
+
+    web_search: dict = {"type": "web_search"}
+    if ai.get("search_context_size"):
+        web_search["search_context_size"] = ai["search_context_size"]
+
+    request = dict(
+        model=model,
+        instructions=SYSTEM,
+        input=prompt,
+        tools=[web_search],
+        max_tool_calls=int(ai.get("max_web_searches_per_stock", 3)),
+        text={"format": {"type": "json_schema", "name": "fall_analysis", "schema": SCHEMA, "strict": True}},
+        max_output_tokens=int(ai.get("max_output_tokens", 2000)),
+    )
+    if ai.get("reasoning_effort"):
+        request["reasoning"] = {"effort": ai["reasoning_effort"]}
+
+    try:
+        return client.responses.create(**request).output_text
+    except openai.BadRequestError as e:
+        log.warning(
+            "Model %s rejected the web-search/structured-output request (%s); "
+            "retrying without them — the answer will not be search-backed.",
+            model,
+            e,
+        )
+
+    plain = client.responses.create(
+        model=model,
+        instructions=SYSTEM,
+        input=prompt,
+        max_output_tokens=int(ai.get("max_output_tokens", 2000)),
+    )
+    return plain.output_text
+
+
 def _json_objects(text: str):
     """Yield candidate ``{...}`` spans, brace-balanced and quote-aware.
 
-    A single greedy regex spans from the first ``{`` to the last ``}``, so any
-    stray braces in prose after the object (common when the model appends a
-    citation) break the parse.
+    Structured Outputs should make this unnecessary, but the fallback path and
+    any fenced/prose-wrapped reply still have to be parsed defensively.
     """
     depth = 0
     start = -1

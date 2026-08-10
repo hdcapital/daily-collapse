@@ -23,7 +23,7 @@ gh secret set SMTP_USER   --body "you@gmail.com"
 gh secret set SMTP_PASS   --body "your-gmail-app-password"
 gh secret set EMAIL_FROM  --body "you@gmail.com"
 gh secret set EMAIL_TO    --body "you@gmail.com"
-gh secret set ANTHROPIC_API_KEY --body "sk-ant-..."   # enables the AI "why it fell" analysis
+gh secret set OPENAI_API_KEY --body "sk-..."          # enables the AI "why it fell" analysis
 ```
 
 Optional S3 data-lake scan:
@@ -89,7 +89,7 @@ pytest -q                                # offline suite — no network, no secr
 python -m src.main --dry-run --limit 60  # small live run → open out/report.html
 ```
 
-The suite fakes yfinance, `requests` and the Anthropic client (`tests/fakes.py`),
+The suite fakes yfinance, `requests` and the OpenAI client (`tests/fakes.py`),
 so `tests/test_e2e.py` drives the whole universe → prices → filters →
 fundamentals → data lake → analysis → render path without egress. It also runs
 in CI on every push and as a gate before the daily scan sends anything.

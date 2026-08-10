@@ -54,7 +54,7 @@ INFOS = {
 def offline(monkeypatch, tmp_path):
     install_requests(monkeypatch, {"markitdigital": FakeResponse(_universe_csv())})
     install_yf(monkeypatch, HISTORIES, INFOS)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("SMTP_HOST", raising=False)
     monkeypatch.delenv("DATALAKE_S3_BUCKET", raising=False)
     monkeypatch.chdir(tmp_path)
@@ -166,30 +166,26 @@ def test_ai_enabled_path(offline, monkeypatch):
     """With a key present the analysis text must reach the rendered report."""
     import types
 
-    class Block:
-        type = "text"
-        text = '{"reason":"Placement at a 30% discount.","confidence":"high","description":"Gold explorer."}'
+    class Resp:
+        output_text = '{"reason":"Placement at a 30% discount.","confidence":"high","description":"Gold explorer."}'
 
-    class Msg:
-        content = [Block()]
-        stop_reason = "end_turn"
-
-    class FakeAnthropic:
+    class FakeOpenAI:
         def __init__(self, *a, **k):
             pass
 
         @property
-        def messages(self):
-            class _M:
+        def responses(self):
+            class _R:
                 def create(self, **kwargs):
-                    return Msg()
+                    return Resp()
 
-            return _M()
+            return _R()
 
-    mod = types.ModuleType("anthropic")
-    mod.Anthropic = FakeAnthropic
-    monkeypatch.setitem(sys.modules, "anthropic", mod)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    mod = types.ModuleType("openai")
+    mod.OpenAI = FakeOpenAI
+    mod.BadRequestError = type("BadRequestError", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "openai", mod)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
     assert _run(monkeypatch, ["--dry-run"]) == 0
     html = (main.Path("out") / "report.html").read_text()

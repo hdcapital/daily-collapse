@@ -10,7 +10,7 @@ AI web-search analysis) → send a styled HTML email.
 - `src/prices.py` — batched yfinance download, faller filter
 - `src/fundamentals.py` — market cap, EV, EV/Rev, EV/EBIT
 - `src/datalake.py` — S3 + local-folder context scan
-- `src/analysis.py` — Anthropic API (web search tool) "why did it fall"
+- `src/analysis.py` — OpenAI Responses API (web_search tool) "why did it fall"
 - `src/emailer.py` + `src/templates/email.html.j2` — report render + SMTP
 - `config.yaml` — threshold, sector exclusions, caps
 - `.github/workflows/daily-scan.yml` — cron 08:30 UTC Mon–Fri
@@ -22,7 +22,7 @@ pytest -q                                  # offline suite (no network/secrets)
 python -m src.main --dry-run --limit 60    # small live run → out/report.html
 python -m src.main --dry-run               # full universe (~2000 tickers, slow)
 ```
-`tests/fakes.py` stubs yfinance, `requests` and the Anthropic client;
+`tests/fakes.py` stubs yfinance, `requests` and the OpenAI client;
 `tests/test_e2e.py` runs the whole orchestrator against them, so the pipeline is
 fully testable with no egress. Add coverage there when changing `main.py`.
 Open `out/report.html` in a browser to review email styling. A quiet-day render
@@ -30,7 +30,7 @@ can be forced by setting `threshold_pct: 99` temporarily.
 
 ## Env vars (GitHub secrets in CI, export locally to test)
 Required for email: `SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS EMAIL_FROM EMAIL_TO`
-Optional: `ANTHROPIC_API_KEY` (AI analysis), `AWS_*` + `DATALAKE_S3_BUCKET`/`DATALAKE_S3_PREFIX` (S3 lake).
+Optional: `OPENAI_API_KEY` (AI analysis), `AWS_*` + `DATALAKE_S3_BUCKET`/`DATALAKE_S3_PREFIX` (S3 lake).
 Everything degrades gracefully when a secret is missing — the run still produces `out/report.html`.
 
 ## Gotchas
@@ -46,5 +46,9 @@ Everything degrades gracefully when a secret is missing — the run still produc
 - Email HTML is autoescaped — `select_autoescape` must keep matching the `.j2`
   suffix, or AI/web-search text can inject markup into the report.
 - Email HTML must stay table-based with inline styles (Gmail/Outlook strip <style>).
-- Keep AI responses parseable: `analysis.SYSTEM` demands raw JSON; `_parse` regexes
-  the first `{...}` block as a fence-tolerant fallback.
+- Keep AI responses parseable: `analysis.SCHEMA` is sent as a strict Structured
+  Output *and* `analysis.SYSTEM` demands raw JSON, so the fallback path still
+  works; `_parse` scans brace-balanced `{...}` spans as a fence-tolerant backstop.
+- `analysis._request` retries once without `tools`/`text` if the model rejects
+  them, so an ID that lacks web search or Structured Outputs still answers —
+  watch the Actions log for that warning, it means answers aren't search-backed.
