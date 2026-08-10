@@ -29,11 +29,14 @@ class FakeS3:
     """
 
     def __init__(self, objects: dict[str, bytes], fail_listing: bool = False, ages: dict | None = None):
+        import threading
+
         self.objects = objects
         self.fail_listing = fail_listing
         self.ages = ages or {}
         self.list_calls = 0
         self.downloaded: list[str] = []
+        self._lock = threading.Lock()
 
     def _modified(self, key):
         from datetime import datetime, timedelta, timezone
@@ -48,22 +51,36 @@ class FakeS3:
 
         class _P:
             def paginate(self, **kwargs):
-                outer.list_calls += 1
+                with outer._lock:
+                    outer.list_calls += 1
                 if outer.fail_listing:
                     raise RuntimeError("AccessDenied: s3:ListBucket")
                 prefix = kwargs.get("Prefix") or ""
-                contents = []
-                for k, v in outer.objects.items():
+                delimiter = kwargs.get("Delimiter")
+                contents, folders, seen_folders = [], [], set()
+                for k in sorted(outer.objects):
                     if not k.startswith(prefix):
                         continue
-                    entry = {"Key": k, "Size": len(v)}
+                    rest = k[len(prefix):]
+                    if delimiter and delimiter in rest:
+                        # Rolled up into a CommonPrefix, like real S3.
+                        folder = prefix + rest.split(delimiter, 1)[0] + delimiter
+                        if folder not in seen_folders:
+                            seen_folders.add(folder)
+                            folders.append(folder)
+                        continue
+                    entry = {"Key": k, "Size": len(outer.objects[k])}
                     modified = outer._modified(k)
                     if modified is not None:
                         entry["LastModified"] = modified
                     contents.append(entry)
                 # Two pages, to exercise pagination.
-                yield {"Contents": contents[:1]}
-                yield {"Contents": contents[1:]}
+                mid = (len(contents) + 1) // 2
+                yield {
+                    "Contents": contents[:mid],
+                    "CommonPrefixes": [{"Prefix": f} for f in folders],
+                }
+                yield {"Contents": contents[mid:]}
 
         return _P()
 
@@ -178,12 +195,15 @@ OBJECTS = {
 }
 
 
-def test_bucket_is_listed_once_across_many_tickers(monkeypatch):
-    """The whole point of the fix: one listing per run, not one per stock."""
+def test_bucket_is_walked_once_across_many_tickers(monkeypatch):
+    """The whole point of the caching: one walk per run, not one per stock."""
     fake = install_s3(monkeypatch, OBJECTS)
-    for ticker in ("XYZ", "ABC", "DEF", "GHI", "JKL"):
+    datalake.scan_s3("XYZ", 5, 4000)
+    calls_after_first = fake.list_calls
+    assert calls_after_first > 0
+    for ticker in ("ABC", "DEF", "GHI", "JKL"):
         datalake.scan_s3(ticker, 5, 4000)
-    assert fake.list_calls == 1
+    assert fake.list_calls == calls_after_first
 
 
 def test_only_matching_objects_are_downloaded(monkeypatch):
@@ -191,8 +211,10 @@ def test_only_matching_objects_are_downloaded(monkeypatch):
     hits = datalake.scan_s3("XYZ", 5, 4000)
     assert sorted(fake.downloaded) == ["notes/XYZ-drilling.txt", "notes/XYZ-placement.md"]
     assert len(hits) == 2
-    assert hits[0]["source"].startswith("s3://my-lake/")
-    assert "25% discount" in hits[0]["text"]
+    # Listing is lexicographic (as on real S3), so drilling.txt comes first.
+    assert hits[0]["source"] == "s3://my-lake/notes/XYZ-drilling.txt"
+    assert "3.1 g/t" in hits[0]["text"]
+    assert "25% discount" in hits[1]["text"]
 
 
 def test_unmatched_ticker_downloads_nothing(monkeypatch):
@@ -228,11 +250,10 @@ def test_s3_zero_budget_skips_entirely(monkeypatch):
 
 def test_listing_failure_is_reported_once(monkeypatch, caplog):
     """A permissions error must not produce one warning per stock."""
-    fake = install_s3(monkeypatch, OBJECTS, fail_listing=True)
+    install_s3(monkeypatch, OBJECTS, fail_listing=True)
     with caplog.at_level("WARNING"):
         for ticker in ("XYZ", "ABC", "DEF"):
             assert datalake.scan_s3(ticker, 5, 4000) == []
-    assert fake.list_calls == 1
     assert sum("listing failed" in r.message for r in caplog.records) == 1
 
 
@@ -295,15 +316,91 @@ def test_age_is_part_of_the_cache_key(monkeypatch):
     """Changing the window must re-list rather than reuse a differently-filtered one."""
     fake = install_s3(monkeypatch, AGED, ages={"notes/XYZ-lastmonth.md": 30})
     assert len(datalake.scan_s3("XYZ", 5, 4000, max_age_days=7)) == 1
+    calls_after_first = fake.list_calls
     assert len(datalake.scan_s3("XYZ", 5, 4000, max_age_days=0)) == 2
-    assert fake.list_calls == 2
+    assert fake.list_calls == 2 * calls_after_first  # a second, separate walk
 
 
 def test_age_filtered_listing_still_cached_across_tickers(monkeypatch):
     fake = install_s3(monkeypatch, AGED, ages={"notes/XYZ-lastmonth.md": 30})
-    for ticker in ("XYZ", "ABC", "DEF"):
+    datalake.scan_s3("XYZ", 5, 4000, max_age_days=7)
+    calls_after_first = fake.list_calls
+    for ticker in ("ABC", "DEF"):
         datalake.scan_s3(ticker, 5, 4000, max_age_days=7)
-    assert fake.list_calls == 1
+    assert fake.list_calls == calls_after_first
+
+
+# ------------------------------------------------------- parallel bucket walk
+
+
+FOLDERED = {
+    "root-note-XYZ.md": b"XYZ loose note at the bucket root",
+    "broker/XYZ-target-cut.md": b"XYZ downgraded",
+    "broker/ABC-initiation.md": b"ABC initiated",
+    "news/XYZ-halt.txt": b"XYZ trading halt",
+    "news/deep/nested/XYZ-old-story.md": b"XYZ archive piece",
+    "screens/weekly.csv": b"XYZ,ABC,DEF",
+}
+
+
+def test_foldered_bucket_is_fanned_out(monkeypatch):
+    """Multiple top-level folders -> one probe + one walk per folder."""
+    fake = install_s3(monkeypatch, FOLDERED)
+    hits = datalake.scan_s3("XYZ", 10, 4000)
+    # 1 probe + broker/ + news/ + screens/ = 4 listings
+    assert fake.list_calls == 4
+    # Completeness: root-level, shallow, and deeply nested keys all found.
+    assert [h["source"] for h in hits] == [
+        "s3://my-lake/broker/XYZ-target-cut.md",
+        "s3://my-lake/news/XYZ-halt.txt",
+        "s3://my-lake/news/deep/nested/XYZ-old-story.md",
+        "s3://my-lake/root-note-XYZ.md",
+    ]
+
+
+def test_parallel_walk_result_is_sorted_and_deterministic(monkeypatch):
+    """Thread timing must not change which notes reach the AI."""
+    objects = {f"folder{i}/XYZ-note-{i}.md": b"XYZ" for i in range(20)}
+    install_s3(monkeypatch, objects)
+    hits = datalake.scan_s3("XYZ", 50, 4000)
+    sources = [h["source"] for h in hits]
+    assert sources == sorted(sources)
+    assert len(sources) == 20
+
+
+def test_parallel_walk_applies_the_age_filter(monkeypatch):
+    install_s3(monkeypatch, FOLDERED, ages={"news/XYZ-halt.txt": 30})
+    hits = datalake.scan_s3("XYZ", 10, 4000, max_age_days=7)
+    assert "s3://my-lake/news/XYZ-halt.txt" not in [h["source"] for h in hits]
+    assert len(hits) == 3
+
+
+def test_cap_respected_in_parallel_mode(monkeypatch, caplog):
+    monkeypatch.setattr(datalake, "MAX_KEYS_INDEXED", 3)
+    objects = {f"folder{i}/XYZ-{j}.md": b"XYZ" for i in range(4) for j in range(5)}
+    install_s3(monkeypatch, objects)
+    with caplog.at_level("WARNING"):
+        hits = datalake.scan_s3("XYZ", 50, 4000)
+    assert len(hits) <= 3
+    assert any("capped" in r.message for r in caplog.records)
+
+
+def test_too_many_folders_falls_back_to_flat_walk(monkeypatch):
+    """Past the fan-out bound the walk goes flat — complete, with no duplicates."""
+    monkeypatch.setattr(datalake, "MAX_FANOUT_FOLDERS", 2)
+    fake = install_s3(monkeypatch, FOLDERED)
+    hits = datalake.scan_s3("XYZ", 10, 4000)
+    sources = [h["source"] for h in hits]
+    assert len(sources) == len(set(sources)) == 4
+    assert fake.list_calls == 2  # probe + one flat re-walk
+
+
+def test_growth_warning_fires_on_a_big_bucket(monkeypatch, caplog):
+    monkeypatch.setattr(datalake, "GROWTH_WARN_OBJECTS", 4)
+    install_s3(monkeypatch, FOLDERED)
+    with caplog.at_level("WARNING"):
+        datalake.scan_s3("XYZ", 10, 4000)
+    assert any("DATALAKE_S3_PREFIX" in r.message for r in caplog.records)
 
 
 def test_gather_context_passes_the_age_window(monkeypatch, tmp_path):

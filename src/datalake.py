@@ -13,6 +13,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -57,7 +60,10 @@ def scan_local(ticker: str, root: str, max_files: int, max_chars: int) -> list[d
     return hits
 
 
-MAX_KEYS_INDEXED = 100_000  # guard against an unbounded bucket listing
+MAX_KEYS_INDEXED = 100_000  # cap on *kept* entries — a memory guard, not a feature
+MAX_LIST_WORKERS = 12  # concurrent listings; S3 tolerates thousands/sec, this is nowhere near
+MAX_FANOUT_FOLDERS = 512  # beyond this, per-folder requests would outnumber plain pages
+GROWTH_WARN_OBJECTS = 250_000  # start telling the operator the walk is getting long
 
 # The bucket is listed once per process and reused for every ticker. Listing it
 # per ticker meant a full pass over the lake for each flagged stock — with 30
@@ -80,14 +86,106 @@ def _s3_client():
     return _client_cache[0]
 
 
+class _WalkState:
+    """Shared counters for a (possibly parallel) bucket walk."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.seen = 0  # objects walked past
+        self.kept = 0  # objects retained after the age filter
+        self.stop = False  # kept hit MAX_KEYS_INDEXED — wind down
+
+
+def _list_prefix(s3, bucket, prefix, cutoff, state, delimiter=None):
+    """List one prefix, returning (kept entries, sub-folders seen).
+
+    Without a delimiter this walks the prefix's whole subtree; with "/" it
+    returns only direct keys plus the immediate sub-folders.
+    """
+    kept: list[tuple[str, int]] = []
+    folders: list[str] = []
+    paginator = s3.get_paginator("list_objects_v2")
+    kwargs = {"Bucket": bucket, "Prefix": prefix}
+    if delimiter:
+        kwargs["Delimiter"] = delimiter
+    for page in paginator.paginate(**kwargs):
+        for cp in page.get("CommonPrefixes", []):
+            folders.append(cp["Prefix"])
+        contents = page.get("Contents", [])
+        batch = []
+        for obj in contents:
+            if cutoff is not None:
+                modified = obj.get("LastModified")
+                # Keep anything undated rather than silently dropping it.
+                if modified is not None and modified < cutoff:
+                    continue
+            batch.append((obj["Key"], obj["Size"]))
+        kept.extend(batch)
+        with state.lock:
+            state.seen += len(contents)
+            state.kept += len(batch)
+            if state.kept >= MAX_KEYS_INDEXED:
+                state.stop = True
+            if state.stop:
+                break
+    return kept, folders
+
+
+def _walk(s3, bucket, prefix, cutoff):
+    """Walk the bucket, fanning out across top-level folders when there are some.
+
+    One delimiter probe finds the folders under `prefix` (and lists any loose
+    keys at that level as a side effect). Each folder's subtree is then listed
+    in parallel — the same number of S3 requests as a flat walk, spread across
+    MAX_LIST_WORKERS threads instead of one. A flat bucket has no folders to
+    fan out over, so it degrades to exactly the old sequential walk; ditto a
+    pathological layout with more folders than MAX_FANOUT_FOLDERS, where
+    per-folder requests would cost more than plain pages.
+    """
+    state = _WalkState()
+    keys, folders = _list_prefix(s3, bucket, prefix, cutoff, state, delimiter="/")
+    folders = list(dict.fromkeys(folders))  # paranoid dedupe, order-stable
+
+    if state.stop or not folders:
+        mode = "flat, sequential"
+    elif len(folders) == 1:
+        more, _ = _list_prefix(s3, bucket, folders[0], cutoff, state)
+        keys += more
+        mode = "single folder, sequential"
+    elif len(folders) <= MAX_FANOUT_FOLDERS:
+        with ThreadPoolExecutor(max_workers=MAX_LIST_WORKERS) as pool:
+            futures = [
+                pool.submit(_list_prefix, s3, bucket, folder, cutoff, state)
+                for folder in folders
+            ]
+            for future in futures:
+                more, _ = future.result()
+                keys += more
+        mode = f"parallel over {len(folders)} folders"
+    else:
+        # Too many folders for fan-out to pay off — re-walk flat from scratch
+        # (discarding the probe's partial results so nothing is double-counted).
+        state = _WalkState()
+        keys, _ = _list_prefix(s3, bucket, prefix, cutoff, state)
+        mode = f"{len(folders)} top-level folders, sequential"
+
+    # Sort so the result (and therefore which notes reach the AI) is identical
+    # to a plain lexicographic listing, regardless of thread timing.
+    keys.sort()
+    if state.stop:
+        del keys[MAX_KEYS_INDEXED:]
+    return keys, state.seen, state.stop, mode
+
+
 def _bucket_listing(s3, bucket: str, prefix: str, max_age_days: int = 0) -> list[tuple[str, int]]:
     """(key, size) for every object under prefix — fetched once, then cached.
 
     With `max_age_days` set, objects last modified before the cutoff are
     discarded as the listing streams past. S3 has no server-side date filter
     (ListObjectsV2 narrows by key prefix only), so every object is still walked;
-    what this saves is the memory and the per-ticker matching, not the API time.
-    Narrow `DATALAKE_S3_PREFIX` if the walk itself needs to get shorter.
+    the walk is parallelised across top-level folders (see _walk), but its total
+    request count still grows with the bucket. Narrow `DATALAKE_S3_PREFIX` if
+    the walk itself needs to get shorter.
 
     A failure is cached too, so a permissions problem is reported once rather
     than once per ticker.
@@ -97,39 +195,33 @@ def _bucket_listing(s3, bucket: str, prefix: str, max_age_days: int = 0) -> list
         return _listing_cache[cache_key]
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days) if max_age_days > 0 else None
-    keys: list[tuple[str, int]] = []
-    seen = 0
-    capped = False
+    started = time.monotonic()
     try:
-        paginator = s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-            for obj in page.get("Contents", []):
-                seen += 1
-                if cutoff is not None:
-                    modified = obj.get("LastModified")
-                    # Keep anything undated rather than silently dropping it.
-                    if modified is not None and modified < cutoff:
-                        continue
-                keys.append((obj["Key"], obj["Size"]))
-            if len(keys) >= MAX_KEYS_INDEXED:
-                capped = True
-                break
+        keys, seen, capped, mode = _walk(s3, bucket, prefix, cutoff)
+        elapsed = time.monotonic() - started
         if capped:
             log.warning(
-                "Data lake listing capped at %d objects — set DATALAKE_S3_PREFIX to narrow the scan",
+                "Data lake listing capped at %d kept objects — set DATALAKE_S3_PREFIX or "
+                "lower datalake.max_age_days",
                 MAX_KEYS_INDEXED,
             )
         if cutoff is not None:
             log.info(
-                "Data lake: kept %d of %d object(s) modified in the last %d day(s) from s3://%s/%s",
-                len(keys),
-                seen,
-                max_age_days,
-                bucket,
-                prefix,
+                "Data lake: kept %d of %d object(s) modified in the last %d day(s) "
+                "from s3://%s/%s in %.1fs (%s)",
+                len(keys), seen, max_age_days, bucket, prefix, elapsed, mode,
             )
         else:
-            log.info("Data lake: indexed %d object(s) from s3://%s/%s", len(keys), bucket, prefix)
+            log.info(
+                "Data lake: indexed %d object(s) from s3://%s/%s in %.1fs (%s)",
+                len(keys), bucket, prefix, elapsed, mode,
+            )
+        if seen >= GROWTH_WARN_OBJECTS:
+            log.warning(
+                "The data lake has %d objects and the nightly walk grows with it — "
+                "point DATALAKE_S3_PREFIX at a dated folder to keep it fast (see README, Data lake)",
+                seen,
+            )
     except Exception as e:  # noqa: BLE001
         log.warning("S3 data-lake listing failed — S3 context skipped for this run: %s", e)
         keys = []

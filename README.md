@@ -86,8 +86,16 @@ Two sources, both optional and merged:
 * **S3** — set the `DATALAKE_*` secrets; files whose key contains the ticker are
   pulled (text formats, ≤2MB) and snippets fed to the AI. `datalake.max_age_days`
   (default `7`) ignores objects last modified before that window; `0` uses the
-  whole bucket. Note S3 cannot filter by date server-side, so the bucket is still
-  walked in full — narrow `DATALAKE_S3_PREFIX` to shorten the walk itself.
+  whole bucket.
+
+  S3 can't filter by date server-side, so every nightly run must still walk the
+  full listing — but the walk now fans out in parallel across the bucket's
+  top-level folders (up to 12 at once), so it stays quick even as the lake grows.
+  A flat bucket with no folders can't be fanned out and falls back to a
+  sequential walk. Watch the log line `kept N of M object(s) … in Xs (mode)`:
+  when `M` heads toward a million, point `DATALAKE_S3_PREFIX` at a dated folder
+  (e.g. `notes/2026/`) so the walk only covers recent keys — that's the lever
+  that keeps it fast forever.
 * **Local** — drop text/markdown notes into `datalake_sample/` (or repoint
   `datalake.local_dir` in config); any file mentioning the ticker is used.
 

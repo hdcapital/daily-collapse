@@ -53,6 +53,13 @@ Everything degrades gracefully when a secret is missing — the run still produc
   ListObjectsV2 has no server-side date filter, so this bounds memory and the cap,
   not the walk time. The age is part of the listing cache key. It is deliberately
   S3-only: local files are re-checked-out each run, so their mtimes are worthless.
+- `datalake._walk` parallelises the listing: one Delimiter="/" probe finds the
+  top-level folders, then each folder subtree is listed concurrently
+  (MAX_LIST_WORKERS). Flat buckets and >MAX_FANOUT_FOLDERS layouts fall back to
+  the sequential walk. Results are **sorted before caching** so which notes reach
+  the AI never depends on thread timing — keep that sort. The request count still
+  grows with the bucket; DATALAKE_S3_PREFIX is the only true lever on walk time,
+  and a GROWTH_WARN_OBJECTS warning nags when the bucket passes 250k objects.
 - Email HTML is autoescaped — `select_autoescape` must keep matching the `.j2`
   suffix, or AI/web-search text can inject markup into the report.
 - Email HTML must stay table-based with inline styles (Gmail/Outlook strip <style>).
