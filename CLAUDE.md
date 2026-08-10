@@ -18,10 +18,13 @@ AI web-search analysis) → send a styled HTML email.
 ## Test commands
 ```bash
 pip install -r requirements.txt
-pytest -q                                  # offline unit tests
+pytest -q                                  # offline suite (no network/secrets)
 python -m src.main --dry-run --limit 60    # small live run → out/report.html
 python -m src.main --dry-run               # full universe (~2000 tickers, slow)
 ```
+`tests/fakes.py` stubs yfinance, `requests` and the Anthropic client;
+`tests/test_e2e.py` runs the whole orchestrator against them, so the pipeline is
+fully testable with no egress. Add coverage there when changing `main.py`.
 Open `out/report.html` in a browser to review email styling. A quiet-day render
 can be forced by setting `threshold_pct: 99` temporarily.
 
@@ -36,6 +39,12 @@ Everything degrades gracefully when a secret is missing — the run still produc
   asx.com.au download button; if it rotates, update it or rely on the fallback URL.
 - `pct_change` is close-vs-previous-close of daily bars; on the run day yfinance's
   last bar must be today's — the workflow runs well after the 4:12pm closing auction.
+  `prices._latest_session_only` enforces this: tickers whose last bar predates the
+  newest bar in the batch are dropped, so a halted stock can't report a week-old fall.
+- `find_fallers` is strict (`< -threshold`), matching "more than X%" in the config,
+  README and email copy.
+- Email HTML is autoescaped — `select_autoescape` must keep matching the `.j2`
+  suffix, or AI/web-search text can inject markup into the report.
 - Email HTML must stay table-based with inline styles (Gmail/Outlook strip <style>).
 - Keep AI responses parseable: `analysis.SYSTEM` demands raw JSON; `_parse` regexes
   the first `{...}` block as a fence-tolerant fallback.

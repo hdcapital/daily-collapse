@@ -85,12 +85,19 @@ Open the repo in Claude Code — `CLAUDE.md` tells it everything. Quick manual l
 
 ```bash
 pip install -r requirements.txt
-pytest -q                                # offline unit tests
+pytest -q                                # offline suite — no network, no secrets
 python -m src.main --dry-run --limit 60  # small live run → open out/report.html
 ```
+
+The suite fakes yfinance, `requests` and the Anthropic client (`tests/fakes.py`),
+so `tests/test_e2e.py` drives the whole universe → prices → filters →
+fundamentals → data lake → analysis → render path without egress. It also runs
+in CI on every push and as a gate before the daily scan sends anything.
 
 ## Caveats
 
 Prices come from Yahoo Finance and can occasionally lag or misprice illiquid
 micro-caps; fundamentals coverage is patchy for small resource explorers (fields
-show "—" when unavailable). Nothing here is financial advice.
+show "—" when unavailable). Stocks whose most recent Yahoo bar predates the
+latest session — halted or simply untraded names — are skipped rather than
+reported with a stale move. Nothing here is financial advice.

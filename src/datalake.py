@@ -20,8 +20,17 @@ log = logging.getLogger(__name__)
 TEXT_EXT = {".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".log"}
 
 
+def _in_name(ticker: str, name: str) -> str | None:
+    """Filename match on a token boundary.
+
+    A bare substring test makes short codes match constantly — "AI" is inside
+    "email-notes.md", "CBA" inside "acbax.txt".
+    """
+    return re.search(rf"(?<![A-Za-z0-9]){re.escape(ticker)}(?![A-Za-z0-9])", name, re.I)
+
+
 def _snippet_around(text: str, ticker: str, max_chars: int) -> str:
-    m = re.search(rf"\b{re.escape(ticker)}\b", text)
+    m = re.search(rf"\b{re.escape(ticker)}\b", text, re.I)
     if not m:
         return text[:max_chars]
     start = max(0, m.start() - max_chars // 2)
@@ -42,7 +51,7 @@ def scan_local(ticker: str, root: str, max_files: int, max_chars: int) -> list[d
             text = p.read_text(errors="ignore")
         except Exception:  # noqa: BLE001
             continue
-        if ticker in p.name.upper() or re.search(rf"\b{ticker}\b", text):
+        if _in_name(ticker, p.name) or re.search(rf"\b{re.escape(ticker)}\b", text, re.I):
             hits.append({"source": f"local:{p}", "text": _snippet_around(text, ticker, max_chars)})
     return hits
 
@@ -65,8 +74,8 @@ def scan_s3(ticker: str, max_files: int, max_chars: int) -> list[dict]:
                 key = obj["Key"]
                 if Path(key).suffix.lower() not in TEXT_EXT or obj["Size"] > 2_000_000:
                     continue
-                if ticker not in key.upper():
-                    continue  # cheap pass: filename match only, to avoid downloading the lake
+                if not _in_name(ticker, key):
+                    continue  # cheap pass: key match only, to avoid downloading the lake
                 body = s3.get_object(Bucket=bucket, Key=key)["Body"].read(200_000)
                 text = body.decode(errors="ignore")
                 hits.append({"source": f"s3://{bucket}/{key}", "text": _snippet_around(text, ticker, max_chars)})
@@ -82,5 +91,5 @@ def gather_context(ticker: str, cfg: dict) -> list[dict]:
     max_files = int(dl.get("max_files_per_ticker", 5))
     max_chars = int(dl.get("max_chars_per_file", 4000))
     hits = scan_s3(ticker, max_files, max_chars)
-    hits += scan_local(ticker, dl.get("local_dir", ""), max_files - len(hits), max_chars)
+    hits += scan_local(ticker, dl.get("local_dir", ""), max(0, max_files - len(hits)), max_chars)
     return hits

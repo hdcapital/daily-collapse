@@ -30,6 +30,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Cheap offline gate — don't email a report built from broken code.
+      - name: Run tests
+        run: pytest -q
+
       - name: Run scan
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

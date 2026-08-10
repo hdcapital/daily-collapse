@@ -9,6 +9,9 @@ from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
+MAX_CONTINUATIONS = 4  # guards against a pause_turn loop that never settles
+VALID_CONFIDENCE = {"high", "medium", "low", "none-found"}
+
 SYSTEM = (
     "You are an equity analyst covering the ASX. Be factual and terse. "
     "Never invent announcements; if no cause is found, say so plainly. "
@@ -51,11 +54,10 @@ def analyse(
             "raisings, downgrades, drill results or news explaining the fall, then "
             "answer in the required JSON."
         )
-        msg = client.messages.create(
+        request = dict(
             model=ai.get("model", "claude-sonnet-4-6"),
             max_tokens=800,
             system=SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
             tools=[
                 {
                     "type": "web_search_20250305",
@@ -64,26 +66,74 @@ def analyse(
                 }
             ],
         )
-        text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+        messages = [{"role": "user", "content": prompt}]
+        text = ""
+        # The server-side web-search loop can stop with `pause_turn` before it has
+        # written an answer; re-sending the turn resumes it where it left off.
+        for _ in range(MAX_CONTINUATIONS):
+            msg = client.messages.create(messages=messages, **request)
+            text += "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+            if getattr(msg, "stop_reason", None) != "pause_turn":
+                break
+            messages = [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": msg.content},
+            ]
+        else:
+            log.warning("AI analysis for %s still paused after %d turns", ticker, MAX_CONTINUATIONS)
         return _parse(text, yf_summary)
     except Exception as e:  # noqa: BLE001
         log.warning("AI analysis failed for %s: %s", ticker, e)
         return Analysis(description=_shorten(yf_summary))
 
 
+def _json_objects(text: str):
+    """Yield candidate ``{...}`` spans, brace-balanced and quote-aware.
+
+    A single greedy regex spans from the first ``{`` to the last ``}``, so any
+    stray braces in prose after the object (common when the model appends a
+    citation) break the parse.
+    """
+    depth = 0
+    start = -1
+    in_str = False
+    escaped = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0:
+                yield text[start : i + 1]
+
+
 def _parse(text: str, yf_summary: str) -> Analysis:
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
-        return Analysis(description=_shorten(yf_summary))
-    try:
-        d = json.loads(m.group(0))
+    for candidate in _json_objects(text or ""):
+        try:
+            d = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(d, dict) or not (d.keys() & {"reason", "confidence", "description"}):
+            continue
+        confidence = str(d.get("confidence", "low")).strip().lower()
         return Analysis(
             reason=str(d.get("reason", "")).strip() or "No clear catalyst identified.",
-            confidence=str(d.get("confidence", "low")),
+            confidence=confidence if confidence in VALID_CONFIDENCE else "low",
             description=str(d.get("description", "")).strip() or _shorten(yf_summary),
         )
-    except json.JSONDecodeError:
-        return Analysis(description=_shorten(yf_summary))
+    return Analysis(description=_shorten(yf_summary))
 
 
 def _shorten(summary: str, max_words: int = 30) -> str:

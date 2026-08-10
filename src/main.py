@@ -107,12 +107,22 @@ def main() -> int:
     log.info("%d fallers beyond -%s%%", len(fallers), cfg["threshold_pct"])
 
     filtered, excluded = apply_filters(fallers, uni, cfg)
+    total_fallers = len(filtered)
     cap = int(cfg.get("max_stocks_in_email", 40))
+    if total_fallers > cap:
+        log.info("Capping the report at %d of %d flagged stocks (worst first)", cap, total_fallers)
     filtered = filtered.head(cap)
 
     rows = [enrich(r, cfg) for _, r in filtered.iterrows()]
 
-    ctx = emailer.build_context(rows, scanned=len(moves), threshold=cfg["threshold_pct"], excluded=excluded, report_date=report_date)
+    ctx = emailer.build_context(
+        rows,
+        scanned=len(moves),
+        threshold=cfg["threshold_pct"],
+        excluded=excluded,
+        report_date=report_date,
+        total_fallers=total_fallers,
+    )
     html = emailer.render(ctx)
 
     out = Path("out")
@@ -124,7 +134,7 @@ def main() -> int:
         log.info("Dry run — email not sent.")
         return 0
 
-    n = len(rows)
+    n = total_fallers
     subject = (
         f"ASX Fall Wire · {report_date} · {n} stock{'s' if n != 1 else ''} down >{cfg['threshold_pct']:g}%"
         if n

@@ -25,25 +25,51 @@ CONF_COLORS = {
 def render(context: dict) -> str:
     env = Environment(
         loader=FileSystemLoader(TEMPLATE_DIR),
-        autoescape=select_autoescape(["html"]),
+        # The template is email.html.j2, so match on the ".j2" suffix too —
+        # extension-only matching leaves autoescape off and lets AI-sourced text
+        # (which summarises web search results) inject markup into the email.
+        autoescape=select_autoescape(
+            enabled_extensions=("html", "htm", "xml", "j2"),
+            default_for_string=True,
+            default=True,
+        ),
     )
     return env.get_template("email.html.j2").render(**context)
 
 
-def build_context(rows: list[dict], scanned: int, threshold: float, excluded: list[str], report_date: str) -> dict:
+def build_context(
+    rows: list[dict],
+    scanned: int,
+    threshold: float,
+    excluded: list[str],
+    report_date: str,
+    total_fallers: int | None = None,
+) -> dict:
+    """Shape the render context. `rows` is copied, not mutated.
+
+    `total_fallers` is how many stocks tripped the threshold before
+    `max_stocks_in_email` truncated the tail; it defaults to len(rows).
+    """
+    fallers = []
     for r in rows:
+        r = dict(r)
         r["conf_color"] = CONF_COLORS.get(r.get("confidence", "low"), "#64707E")
         # gauge width: 15% fall ≈ 30% bar, capped at 100
         r["bar_pct"] = min(100, round(abs(r["pct_change"]) * 2))
-    worst = rows[0] if rows else None
+        fallers.append(r)
+
+    total = len(fallers) if total_fallers is None else total_fallers
+    worst = fallers[0] if fallers else None
     return {
-        "fallers": rows,
+        "fallers": fallers,
         "scanned": scanned,
         "threshold": f"{threshold:g}",
         "excluded_note": ", ".join(excluded) if excluded else "",
         "report_date": report_date,
         "worst_ticker": worst["ticker"] if worst else "—",
         "worst_pct": worst["pct_str"] if worst else "—",
+        "total_fallers": total,
+        "truncated": max(0, total - len(fallers)),
     }
 
 
@@ -62,8 +88,14 @@ def send(html: str, subject: str) -> None:
     msg.attach(MIMEText("Your email client can't display HTML — open the report artifact instead.", "plain"))
     msg.attach(MIMEText(html, "html"))
 
-    with smtplib.SMTP(host, port, timeout=60) as s:
-        s.starttls()
-        s.login(user, password)
-        s.sendmail(sender, to, msg.as_string())
+    # 465 is implicit TLS (SMTPS); STARTTLS on it fails against most providers.
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=60) as s:
+            s.login(user, password)
+            s.sendmail(sender, to, msg.as_string())
+    else:
+        with smtplib.SMTP(host, port, timeout=60) as s:
+            s.starttls()
+            s.login(user, password)
+            s.sendmail(sender, to, msg.as_string())
     log.info("Email sent to %s", to)

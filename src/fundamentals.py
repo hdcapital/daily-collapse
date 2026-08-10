@@ -51,9 +51,6 @@ def get_fundamentals(ticker: str) -> Fundamentals:
         f.summary = (info.get("longBusinessSummary") or "").strip()
         f.website = info.get("website") or ""
         f.ebit = _ebit_from_statements(t)
-        if f.ebit is None and info.get("ebitda"):
-            # last-resort proxy so the field isn't blank; flagged as EBITDA in email
-            f.ebit = None
 
         ev = f.enterprise_value
         if ev and f.revenue and f.revenue > 0:
