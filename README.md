@@ -83,19 +83,22 @@ quiet day you get a short "no falls beyond threshold" note instead.
 
 Two sources, both optional and merged:
 
-* **S3** — set the `DATALAKE_*` secrets; files whose key contains the ticker are
-  pulled (text formats, ≤2MB) and snippets fed to the AI. `datalake.max_age_days`
-  (default `7`) ignores objects last modified before that window; `0` uses the
-  whole bucket.
-
-  S3 can't filter by date server-side, so every nightly run must still walk the
-  full listing — but the walk now fans out in parallel across the bucket's
-  top-level folders (up to 12 at once), so it stays quick even as the lake grows.
-  A flat bucket with no folders can't be fanned out and falls back to a
-  sequential walk. Watch the log line `kept N of M object(s) … in Xs (mode)`:
-  when `M` heads toward a million, point `DATALAKE_S3_PREFIX` at a dated folder
-  (e.g. `notes/2026/`) so the walk only covers recent keys — that's the lever
-  that keeps it fast forever.
+* **S3 (manifest index — the normal path)** — the lake written by
+  [market-ingestion](https://github.com/hdcapital/market-ingestion) keeps a
+  per-day index: `manifests/<market>/<YYYY-MM-DD>.jsonl`, one line per document
+  with its ticker, object key and admin-noise flag. The scanner reads the last
+  `max_age_days` of those (a handful of requests **no matter how big the lake
+  grows — it never lists the bucket**), matches fallers on the ticker field,
+  skips admin noise, and feeds each document's title + text to the AI.
+  Configure under `datalake.manifests` (`prefix`, `markets`). This matters
+  because document filenames in that lake are MD5 hashes — filename matching
+  finds nothing there.
+* **S3 (fallback walk)** — with `manifests.markets: []`, or when no manifest
+  exists in the bucket, the scanner walks the listing and matches tickers
+  against filenames (text formats, ≤2MB), fanned out in parallel across
+  top-level folders. This is O(bucket) and slows as the lake grows — the log
+  says `kept N of M object(s) … (mode)`; if you're stuck on this path at
+  scale, `DATALAKE_S3_PREFIX` is the lever.
 * **Local** — drop text/markdown notes into `datalake_sample/` (or repoint
   `datalake.local_dir` in config); any file mentioning the ticker is used.
 

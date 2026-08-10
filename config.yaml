@@ -53,3 +53,12 @@ datalake:
   # Applies to S3 only — local files are re-checked-out every run, so their
   # timestamps reflect the checkout, not when the note was written.
   max_age_days: 7
+  # The lake written by hdcapital/market-ingestion keeps a per-day index
+  # (manifests/<market>/<YYYY-MM-DD>.jsonl) with the ticker for every document.
+  # Reading it costs a handful of requests no matter how big the lake grows,
+  # and it matches on the ticker field — document filenames are MD5 hashes, so
+  # filename matching finds nothing there. markets: [] disables this and falls
+  # back to walking the bucket listing (filename matching).
+  manifests:
+    prefix: market-data/
+    markets: [asx]

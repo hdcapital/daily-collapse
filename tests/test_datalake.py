@@ -403,6 +403,155 @@ def test_growth_warning_fires_on_a_big_bucket(monkeypatch, caplog):
     assert any("DATALAKE_S3_PREFIX" in r.message for r in caplog.records)
 
 
+# ------------------------------------------------- manifest-indexed lake reads
+
+
+import json as _json
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+MANIFESTS_CFG = {"prefix": "market-data/", "markets": ["asx"]}
+
+
+def _date(days_ago=0):
+    return (_dt.now(_tz.utc).date() - _td(days=days_ago)).isoformat()
+
+
+def _doc(title, text):
+    return _json.dumps({"title": title, "content": {"text": text}}).encode()
+
+
+def _manifest_line(ticker, key, noise=False):
+    return _json.dumps({"ticker": ticker, "key": key, "is_admin_noise": noise})
+
+
+def _lake(days_ago=0, extra_lines=(), market="asx"):
+    """A market-ingestion-shaped lake: hashed doc filenames + a daily manifest."""
+    y, m, d = _date(days_ago).split("-")
+    doc_key = f"market-data/documents/asx/{y}/{m}/{d}/9f86d081884c7d659a2feaa0c55ad015.json"
+    lines = [_manifest_line("ARF", doc_key), *extra_lines]
+    return {
+        doc_key: _doc("Capital raising announced", "ARF placement at a 25% discount."),
+        f"market-data/manifests/{market}/{_date(days_ago)}.jsonl": ("\n".join(lines) + "\n").encode(),
+    }
+
+
+def test_manifest_index_needs_no_bucket_walk(monkeypatch):
+    """The headline property: zero ListObjects calls, ever."""
+    fake = install_s3(monkeypatch, _lake())
+    hits = datalake.scan_s3("ARF", 5, 4000, max_age_days=7, manifests=MANIFESTS_CFG)
+    assert fake.list_calls == 0
+    assert len(hits) == 1
+    assert "Capital raising announced" in hits[0]["text"]
+    assert "25% discount" in hits[0]["text"]
+
+
+def test_manifest_finds_docs_with_hashed_filenames(monkeypatch):
+    """Doc keys are MD5 hashes — filename matching can't find them; the manifest can."""
+    objects = _lake()
+    doc_key = next(k for k in objects if k.endswith(".json") and "documents" in k)
+    assert "ARF" not in doc_key  # the very case the old matcher was blind to
+    install_s3(monkeypatch, objects)
+    hits = datalake.scan_s3("ARF", 5, 4000, manifests=MANIFESTS_CFG)
+    assert hits and hits[0]["source"].endswith(doc_key)
+
+
+def test_manifest_ticker_match_is_exact(monkeypatch):
+    y, m, d = _date().split("-")
+    other = f"market-data/documents/asx/{y}/{m}/{d}/aaaa.json"
+    objects = _lake(extra_lines=[_manifest_line("ARF2", other)])
+    objects[other] = _doc("Other company", "ARF2 news")
+    install_s3(monkeypatch, objects)
+    hits = datalake.scan_s3("ARF", 5, 4000, manifests=MANIFESTS_CFG)
+    assert len(hits) == 1
+    assert "ARF2" not in hits[0]["text"]
+
+
+def test_admin_noise_is_skipped(monkeypatch):
+    y, m, d = _date().split("-")
+    noise = f"market-data/documents/asx/{y}/{m}/{d}/bbbb.json"
+    objects = _lake(extra_lines=[_manifest_line("ARF", noise, noise=True)])
+    objects[noise] = _doc("Change of registry address", "administrative")
+    install_s3(monkeypatch, objects)
+    hits = datalake.scan_s3("ARF", 5, 4000, manifests=MANIFESTS_CFG)
+    assert len(hits) == 1
+    assert "registry" not in hits[0]["text"]
+
+
+def test_manifest_window_and_weekend_gaps(monkeypatch):
+    """Only dates inside the window are read; missing dates are normal."""
+    objects = _lake(days_ago=2)  # manifest exists 2 days ago only
+    objects.update(_lake(days_ago=30, market="asx"))  # and one far outside the window
+    old_manifest = f"market-data/manifests/asx/{_date(30)}.jsonl"
+    fake = install_s3(monkeypatch, objects)
+    hits = datalake.scan_s3("ARF", 5, 4000, max_age_days=7, manifests=MANIFESTS_CFG)
+    assert len(hits) == 1  # today's gap tolerated, 30-day-old manifest never fetched
+    assert old_manifest not in fake.downloaded
+
+
+def test_manifest_max_files_prefers_newest(monkeypatch):
+    objects = {}
+    for days_ago in (0, 1, 2):
+        y, m, d = _date(days_ago).split("-")
+        key = f"market-data/documents/asx/{y}/{m}/{d}/doc{days_ago}.json"
+        objects[key] = _doc(f"Announcement {days_ago}d ago", "ARF news")
+        objects[f"market-data/manifests/asx/{_date(days_ago)}.jsonl"] = (
+            _manifest_line("ARF", key) + "\n"
+        ).encode()
+    install_s3(monkeypatch, objects)
+    hits = datalake.scan_s3("ARF", 2, 4000, manifests=MANIFESTS_CFG)
+    assert len(hits) == 2
+    assert "0d ago" in hits[0]["text"] and "1d ago" in hits[1]["text"]
+
+
+def test_manifest_index_cached_across_tickers(monkeypatch):
+    fake = install_s3(monkeypatch, _lake())
+    datalake.scan_s3("ARF", 5, 4000, manifests=MANIFESTS_CFG)
+    manifest_gets = sum("manifests/" in k for k in fake.downloaded)
+    datalake.scan_s3("BBB", 5, 4000, manifests=MANIFESTS_CFG)
+    datalake.scan_s3("CCC", 5, 4000, manifests=MANIFESTS_CFG)
+    assert sum("manifests/" in k for k in fake.downloaded) == manifest_gets
+
+
+def test_unreadable_document_is_skipped(monkeypatch):
+    objects = _lake()
+    doc_key = next(k for k in objects if "documents" in k)
+    del objects[doc_key]  # manifest points at a document that's gone
+    install_s3(monkeypatch, objects)
+    assert datalake.scan_s3("ARF", 5, 4000, manifests=MANIFESTS_CFG) == []
+
+
+def test_no_manifests_falls_back_to_the_walk(monkeypatch, caplog):
+    fake = install_s3(monkeypatch, OBJECTS)  # a plain notes bucket, no manifests
+    with caplog.at_level("INFO"):
+        hits = datalake.scan_s3("XYZ", 5, 4000, manifests=MANIFESTS_CFG)
+    assert len(hits) == 2  # filename matching still works
+    assert fake.list_calls > 0
+    assert any("walking the bucket listing instead" in r.message for r in caplog.records)
+
+
+def test_empty_markets_goes_straight_to_the_walk(monkeypatch):
+    fake = install_s3(monkeypatch, OBJECTS)
+    hits = datalake.scan_s3("XYZ", 5, 4000, manifests={"prefix": "x/", "markets": []})
+    assert len(hits) == 2
+    assert not any("manifests/" in k for k in fake.downloaded)
+
+
+def test_gather_context_wires_manifests_through(monkeypatch, tmp_path):
+    fake = install_s3(monkeypatch, _lake())
+    cfg = {
+        "datalake": {
+            "enabled": True,
+            "local_dir": "",
+            "max_files_per_ticker": 5,
+            "max_chars_per_file": 500,
+            "max_age_days": 7,
+            "manifests": {"prefix": "market-data/", "markets": ["asx"]},
+        }
+    }
+    hits = datalake.gather_context("ARF", cfg)
+    assert len(hits) == 1 and fake.list_calls == 0
+
+
 def test_gather_context_passes_the_age_window(monkeypatch, tmp_path):
     fake = install_s3(monkeypatch, AGED, ages={"notes/XYZ-lastmonth.md": 30})
     cfg = {

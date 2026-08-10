@@ -288,3 +288,6 @@ def test_config_file_is_valid():
     assert cfg["max_stocks_in_email"] > 0
     assert "enabled" in cfg["exclude_sectors"]
     assert "model" in cfg["ai_analysis"]
+    manifests = cfg["datalake"]["manifests"]
+    assert manifests["markets"] == ["asx"]
+    assert manifests["prefix"].endswith("/")

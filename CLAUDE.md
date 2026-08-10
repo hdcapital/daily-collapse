@@ -46,6 +46,12 @@ Everything degrades gracefully when a secret is missing — the run still produc
 - Fundamentals are fetched in `main.main` *before* `screen_by_revenue` and the cap,
   so AI calls are only spent on stocks that survive both. Don't move the
   `get_fundamentals` call back inside `enrich`.
+- `datalake.scan_s3` prefers the lake's own **manifest index** (from the
+  hdcapital/market-ingestion repo): `market-data/manifests/<market>/<date>.jsonl`
+  has one line per document with the ticker field. Constant request count
+  forever; document keys are MD5 hashes, so the filename-matching walk finds
+  **nothing** in that lake — never route lake reads back through the walk.
+  The walk survives only as a fallback for manifest-less buckets.
 - `datalake` lists the S3 bucket **once per process** (`_listing_cache`) and reuses it
   for every ticker; listing per ticker made the lake scan dominate run time (~25s ×
   40 stocks). Keep any new S3 code path going through `_bucket_listing`.

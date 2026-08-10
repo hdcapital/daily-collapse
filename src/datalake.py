@@ -10,6 +10,7 @@ in its key/filename or its text. Snippets are truncated and handed to the AI.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -64,17 +65,20 @@ MAX_KEYS_INDEXED = 100_000  # cap on *kept* entries — a memory guard, not a fe
 MAX_LIST_WORKERS = 12  # concurrent listings; S3 tolerates thousands/sec, this is nowhere near
 MAX_FANOUT_FOLDERS = 512  # beyond this, per-folder requests would outnumber plain pages
 GROWTH_WARN_OBJECTS = 250_000  # start telling the operator the walk is getting long
+MANIFEST_DEFAULT_DAYS = 7  # manifest window when datalake.max_age_days is 0 (no age limit)
 
 # The bucket is listed once per process and reused for every ticker. Listing it
 # per ticker meant a full pass over the lake for each flagged stock — with 30
 # stocks that was 30 identical passes, and it dominated the run time.
 _listing_cache: dict[tuple[str, str, int], list[tuple[str, int]]] = {}
+_manifest_cache: dict = {}
 _client_cache: list = []
 
 
 def reset_s3_cache() -> None:
-    """Drop the cached listing and client (used by tests)."""
+    """Drop the cached listing, manifest index and client (used by tests)."""
     _listing_cache.clear()
+    _manifest_cache.clear()
     _client_cache.clear()
 
 
@@ -230,18 +234,128 @@ def _bucket_listing(s3, bucket: str, prefix: str, max_age_days: int = 0) -> list
     return keys
 
 
-def scan_s3(ticker: str, max_files: int, max_chars: int, max_age_days: int = 0) -> list[dict]:
+def _get_bytes(s3, bucket: str, key: str) -> bytes | None:
+    try:
+        return s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    except Exception:  # noqa: BLE001 — missing key or transient error: caller treats as absent
+        return None
+
+
+def _manifest_index(s3, bucket: str, prefix: str, markets: tuple, days: int):
+    """Ticker -> manifest entries, built from the lake's own per-day indexes.
+
+    The market-ingestion lake writes manifests/<market>/<YYYY-MM-DD>.jsonl —
+    one line per document with the ticker, title, object key and noise flag.
+    Reading those is a handful of GETs regardless of lake size, and it matches
+    on the *ticker field* rather than guessing from filenames (document keys
+    are MD5 hashes, so filename matching finds nothing there).
+
+    Returns None when no manifest exists at all, so the caller can fall back
+    to walking the bucket listing. Missing individual dates are normal —
+    weekends and holidays produce no manifest.
+    """
+    cache_key = (bucket, prefix, markets, days)
+    if cache_key in _manifest_cache:
+        return _manifest_cache[cache_key]
+
+    started = time.monotonic()
+    today = datetime.now(timezone.utc).date()
+    index: dict[str, list[dict]] = {}
+    manifests_found = 0
+    documents = 0
+    # Newest date first, so the freshest announcements win max_files_per_ticker.
+    for delta in range(days + 1):
+        date = (today - timedelta(days=delta)).isoformat()
+        for market in markets:
+            raw = _get_bytes(s3, bucket, f"{prefix}manifests/{market}/{date}.jsonl")
+            if raw is None:
+                continue
+            manifests_found += 1
+            for line in raw.decode("utf-8", "replace").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                ticker = str(entry.get("ticker") or "").strip().upper()
+                if not ticker or entry.get("is_admin_noise") or not entry.get("key"):
+                    continue
+                index.setdefault(ticker, []).append(entry)
+                documents += 1
+
+    result = index if manifests_found else None
+    if manifests_found:
+        log.info(
+            "Data lake: manifest index — %d document(s) across %d ticker(s) from %d "
+            "manifest(s) under s3://%s/%smanifests/ in %.1fs (no bucket walk)",
+            documents, len(index), manifests_found, bucket, prefix,
+            time.monotonic() - started,
+        )
+    _manifest_cache[cache_key] = result
+    return result
+
+
+def _manifest_hits(s3, bucket: str, entries: list[dict], max_files: int, max_chars: int) -> list[dict]:
+    """Fetch the documents a ticker's manifest entries point at."""
+    hits: list[dict] = []
+    for entry in entries:
+        if len(hits) >= max_files:
+            break
+        key = entry["key"]
+        raw = _get_bytes(s3, bucket, key)
+        if raw is None:
+            log.warning("Data lake: manifest points at s3://%s/%s but it could not be read", bucket, key)
+            continue
+        try:
+            doc = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            doc = None
+        if isinstance(doc, dict):
+            title = str(doc.get("title") or "").strip()
+            text = str((doc.get("content") or {}).get("text") or "").strip()
+            body = f"{title}\n{text}".strip()
+        else:
+            body = raw.decode("utf-8", "replace")
+        if not body:
+            continue
+        hits.append({"source": f"s3://{bucket}/{key}", "text": body[:max_chars]})
+    return hits
+
+
+def scan_s3(
+    ticker: str,
+    max_files: int,
+    max_chars: int,
+    max_age_days: int = 0,
+    manifests: dict | None = None,
+) -> list[dict]:
     bucket = os.environ.get("DATALAKE_S3_BUCKET")
     if not bucket or max_files <= 0:
         return []
-    prefix = os.environ.get("DATALAKE_S3_PREFIX", "")
-    hits: list[dict] = []
     try:
         s3 = _s3_client()
     except Exception as e:  # noqa: BLE001
         log.warning("S3 data-lake client unavailable: %s", e)
         return []
 
+    # Preferred path: the lake's own per-day manifests — constant cost forever.
+    markets = tuple((manifests or {}).get("markets") or ())
+    if markets:
+        manifest_prefix = (manifests or {}).get("prefix", "")
+        days = max_age_days if max_age_days > 0 else MANIFEST_DEFAULT_DAYS
+        index = _manifest_index(s3, bucket, manifest_prefix, markets, days)
+        if index is not None:
+            return _manifest_hits(s3, bucket, index.get(ticker.upper(), []), max_files, max_chars)
+        log.info(
+            "Data lake: no manifests under s3://%s/%smanifests/ — walking the bucket listing instead",
+            bucket, manifest_prefix,
+        )
+
+    # Fallback: walk the listing and match tickers against filenames.
+    prefix = os.environ.get("DATALAKE_S3_PREFIX", "")
+    hits: list[dict] = []
     for key, size in _bucket_listing(s3, bucket, prefix, max_age_days):
         if len(hits) >= max_files:
             break
@@ -269,6 +383,6 @@ def gather_context(ticker: str, cfg: dict) -> list[dict]:
     # run, so its file times say when the checkout happened, not when the note
     # was written — filtering on them would be meaningless.
     max_age_days = int(dl.get("max_age_days", 0) or 0)
-    hits = scan_s3(ticker, max_files, max_chars, max_age_days)
+    hits = scan_s3(ticker, max_files, max_chars, max_age_days, dl.get("manifests"))
     hits += scan_local(ticker, dl.get("local_dir", ""), max(0, max_files - len(hits)), max_chars)
     return hits
