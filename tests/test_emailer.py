@@ -83,6 +83,16 @@ def test_no_truncation_note_when_complete():
     assert "showing" not in emailer.render(ctx).lower()
 
 
+def test_outage_warning_is_rendered():
+    """A skipped screen must be visible in the email, not just in the CI log."""
+    html = emailer.render(_ctx([_row()], screen_skipped=True))
+    assert "revenue screen skipped" in html
+
+
+def test_no_outage_warning_on_a_normal_run():
+    assert "screen skipped" not in emailer.render(_ctx([_row()]))
+
+
 def test_confidence_colours():
     for conf in ("high", "medium", "low", "none-found"):
         ctx = _ctx([_row(confidence=conf)])

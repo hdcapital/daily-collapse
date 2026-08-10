@@ -20,6 +20,10 @@ class Fundamentals:
     summary: str = ""
     website: str = ""
     financial_currency: str = ""
+    # False when the provider returned nothing at all (throttled, down, bad
+    # ticker). Distinct from "returned data, but no revenue line" — the revenue
+    # screen must not treat an outage as evidence a company is small.
+    available: bool = False
     raw: dict = field(default_factory=dict)
 
 
@@ -46,6 +50,7 @@ def get_fundamentals(ticker: str) -> Fundamentals:
         t = yf.Ticker(f"{ticker}.AX")
         info = t.info or {}
         f.raw = info
+        f.available = bool(info)
         f.market_cap = info.get("marketCap")
         f.enterprise_value = info.get("enterpriseValue")
         f.revenue = info.get("totalRevenue")

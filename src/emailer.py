@@ -46,6 +46,7 @@ def build_context(
     total_fallers: int | None = None,
     hidden_by_revenue: int = 0,
     min_revenue: float = 0.0,
+    screen_skipped: bool = False,
 ) -> dict:
     """Shape the render context. `rows` is copied, not mutated.
 
@@ -75,6 +76,13 @@ def build_context(
         "revenue_note": (
             f"revenue screen: {hidden_by_revenue} hidden below ${min_revenue / 1e6:,.0f}M"
             if hidden_by_revenue and min_revenue > 0
+            else ""
+        ),
+        # Loud, not buried: a reader must never mistake a data outage for a
+        # quiet market, nor for a screen that legitimately filtered everything.
+        "screen_warning": (
+            "fundamentals unavailable — revenue screen skipped, showing every faller"
+            if screen_skipped
             else ""
         ),
     }

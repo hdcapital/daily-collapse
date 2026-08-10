@@ -51,16 +51,34 @@ def apply_filters(fallers, uni, cfg):
     return merged.reset_index(drop=True), excluded
 
 
-def screen_by_revenue(candidates: list[tuple], cfg: dict) -> tuple[list[tuple], int]:
+# If this share of candidates come back with no fundamentals at all, the
+# provider is down or throttling us — not evidence that every stock is tiny.
+OUTAGE_FRACTION = 0.5
+
+
+def screen_by_revenue(candidates: list[tuple], cfg: dict) -> tuple[list[tuple], int, bool]:
     """Drop fallers whose revenue is below `min_revenue_aud`.
 
-    `candidates` is [(row, Fundamentals)]. Returns the survivors and how many
-    were hidden, so the email can disclose the screen rather than silently
-    showing a shorter list.
+    `candidates` is [(row, Fundamentals)]. Returns the survivors, how many were
+    hidden, and whether the screen was abandoned because the data provider
+    failed wholesale — so the email can disclose the screen rather than
+    silently showing a shorter list, and can never render "a quiet close" just
+    because Yahoo stopped answering.
     """
     min_rev = float(cfg.get("min_revenue_aud", 0) or 0)
-    if min_rev <= 0:
-        return candidates, 0
+    if min_rev <= 0 or not candidates:
+        return candidates, 0, False
+
+    unavailable = sum(1 for _, f in candidates if not f.available)
+    if unavailable >= max(1, len(candidates)) * OUTAGE_FRACTION:
+        log.warning(
+            "Fundamentals unavailable for %d of %d candidates — the data provider is "
+            "failing or throttling. Skipping the revenue screen for this run and "
+            "reporting every faller rather than hiding them all.",
+            unavailable,
+            len(candidates),
+        )
+        return candidates, 0, True
 
     include_unknown = bool(cfg.get("include_unknown_revenue", False))
     kept, hidden = [], 0
@@ -87,7 +105,7 @@ def screen_by_revenue(candidates: list[tuple], cfg: dict) -> tuple[list[tuple], 
             hidden += 1
     if hidden:
         log.info("Revenue screen hid %d stock(s) below $%.1fM", hidden, min_rev / 1e6)
-    return kept, hidden
+    return kept, hidden, False
 
 
 def enrich(row, f, cfg) -> dict:
@@ -150,7 +168,7 @@ def main() -> int:
     # calls (the expensive part) are only spent on stocks that survive both.
     log.info("Fetching fundamentals for %d candidate(s)", len(filtered))
     candidates = [(row, get_fundamentals(row["ticker"])) for _, row in filtered.iterrows()]
-    candidates, hidden_by_revenue = screen_by_revenue(candidates, cfg)
+    candidates, hidden_by_revenue, screen_skipped = screen_by_revenue(candidates, cfg)
 
     total_fallers = len(candidates)
     cap = int(cfg.get("max_stocks_in_email", 40))
@@ -168,6 +186,7 @@ def main() -> int:
         total_fallers=total_fallers,
         hidden_by_revenue=hidden_by_revenue,
         min_revenue=float(cfg.get("min_revenue_aud", 0) or 0),
+        screen_skipped=screen_skipped,
     )
     html = emailer.render(ctx)
 

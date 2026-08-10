@@ -37,6 +37,11 @@
       sectors muted: {{ excluded_note }}
     </td></tr>
     {% endif %}
+    {% if screen_warning %}
+    <tr><td style="font-family:'SF Mono',Menlo,Consolas,monospace;font-size:11px;color:#F0475C;padding-top:6px;">
+      &#9888; {{ screen_warning }}
+    </td></tr>
+    {% endif %}
     {% if revenue_note %}
     <tr><td style="font-family:'SF Mono',Menlo,Consolas,monospace;font-size:11px;color:#8B95A3;padding-top:6px;">
       {{ revenue_note }}

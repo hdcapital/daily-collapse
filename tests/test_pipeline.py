@@ -54,43 +54,80 @@ def test_min_market_cap():
     assert list(filtered["ticker"]) == ["BBB"]
 
 
-def _cand(ticker, revenue, currency="AUD"):
-    return ({"ticker": ticker}, Fundamentals(revenue=revenue, financial_currency=currency))
+def _cand(ticker, revenue, currency="AUD", available=True):
+    return (
+        {"ticker": ticker},
+        Fundamentals(revenue=revenue, financial_currency=currency, available=available),
+    )
 
 
 def test_revenue_screen_keeps_at_or_above_threshold():
     cands = [_cand("AAA", 25e6), _cand("BBB", 20e6), _cand("CCC", 19_999_999)]
-    kept, hidden = screen_by_revenue(cands, {"min_revenue_aud": 20e6})
+    kept, hidden, skipped = screen_by_revenue(cands, {"min_revenue_aud": 20e6})
     assert [row["ticker"] for row, _ in kept] == ["AAA", "BBB"]
-    assert hidden == 1
+    assert hidden == 1 and not skipped
 
 
 def test_revenue_screen_drops_unknown_by_default():
-    kept, hidden = screen_by_revenue([_cand("AAA", None)], {"min_revenue_aud": 20e6})
-    assert kept == [] and hidden == 1
+    """Provider answered but had no revenue line — a real absence, so hide it."""
+    cands = [_cand("AAA", None), _cand("BBB", 25e6), _cand("CCC", 30e6)]
+    kept, hidden, skipped = screen_by_revenue(cands, {"min_revenue_aud": 20e6})
+    assert [row["ticker"] for row, _ in kept] == ["BBB", "CCC"]
+    assert hidden == 1 and not skipped
 
 
 def test_revenue_screen_can_keep_unknown():
     cfg = {"min_revenue_aud": 20e6, "include_unknown_revenue": True}
-    kept, hidden = screen_by_revenue([_cand("AAA", None)], cfg)
-    assert len(kept) == 1 and hidden == 0
+    cands = [_cand("AAA", None), _cand("BBB", 25e6), _cand("CCC", 30e6)]
+    kept, hidden, skipped = screen_by_revenue(cands, cfg)
+    assert len(kept) == 3 and hidden == 0 and not skipped
 
 
 def test_revenue_screen_disabled_by_zero():
     cands = [_cand("AAA", 1.0), _cand("BBB", None)]
-    kept, hidden = screen_by_revenue(cands, {"min_revenue_aud": 0})
-    assert kept == cands and hidden == 0
+    kept, hidden, skipped = screen_by_revenue(cands, {"min_revenue_aud": 0})
+    assert kept == cands and hidden == 0 and not skipped
 
 
 def test_revenue_screen_compares_foreign_currency_unconverted():
     """A USD reporter is compared on the raw figure — noted, not silently converted."""
-    kept, hidden = screen_by_revenue([_cand("AAA", 25e6, "USD")], {"min_revenue_aud": 20e6})
+    kept, hidden, _ = screen_by_revenue([_cand("AAA", 25e6, "USD")], {"min_revenue_aud": 20e6})
     assert len(kept) == 1 and hidden == 0
 
 
 def test_revenue_screen_handles_zero_revenue():
-    kept, hidden = screen_by_revenue([_cand("AAA", 0.0)], {"min_revenue_aud": 20e6})
-    assert kept == [] and hidden == 1
+    cands = [_cand("AAA", 0.0), _cand("BBB", 25e6)]
+    kept, hidden, _ = screen_by_revenue(cands, {"min_revenue_aud": 20e6})
+    assert [row["ticker"] for row, _ in kept] == ["BBB"] and hidden == 1
+
+
+def test_provider_outage_skips_the_screen_entirely():
+    """Regression for the 2026-08-10 run: Yahoo throttled, all 26 fallers had no
+    fundamentals, and the screen silently rendered an empty 'quiet close'."""
+    cands = [_cand(f"T{i}", None, available=False) for i in range(26)]
+    kept, hidden, skipped = screen_by_revenue(cands, {"min_revenue_aud": 20e6})
+    assert len(kept) == 26, "an outage must never empty the report"
+    assert hidden == 0 and skipped is True
+
+
+def test_partial_outage_below_threshold_still_screens():
+    """A couple of gaps is normal coverage, not an outage — keep screening."""
+    cands = [_cand("AAA", 25e6), _cand("BBB", 30e6), _cand("CCC", None, available=False)]
+    kept, hidden, skipped = screen_by_revenue(cands, {"min_revenue_aud": 20e6})
+    assert [row["ticker"] for row, _ in kept] == ["AAA", "BBB"]
+    assert hidden == 1 and skipped is False
+
+
+def test_outage_detection_warns(caplog):
+    cands = [_cand(f"T{i}", None, available=False) for i in range(4)]
+    with caplog.at_level("WARNING"):
+        screen_by_revenue(cands, {"min_revenue_aud": 20e6})
+    assert any("throttling" in r.message for r in caplog.records)
+
+
+def test_no_candidates_is_not_an_outage():
+    kept, hidden, skipped = screen_by_revenue([], {"min_revenue_aud": 20e6})
+    assert kept == [] and hidden == 0 and skipped is False
 
 
 def test_ratio_formatting():
