@@ -140,6 +140,49 @@ def test_cap_truncates_and_discloses(offline, monkeypatch):
     assert "2" in html  # total flagged is still reported
 
 
+def test_dry_run_writes_meta_for_the_send_job(offline, monkeypatch):
+    """The evening scan saves everything the 5am --send-only job needs."""
+    import json
+
+    assert _run(monkeypatch, ["--dry-run"]) == 0
+    meta = json.loads((offline / "out" / "meta.json").read_text())
+    assert meta["subject"] == "ASX Fall Wire · Fri 07 Aug 2026 · 2 stocks down >15%"
+    assert meta["total_fallers"] == 2
+    assert meta["generated_at"]  # ISO timestamp for the staleness check
+
+
+def test_send_only_delivers_saved_report(offline, monkeypatch):
+    sent = {}
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
+    monkeypatch.setattr(main.emailer, "send", lambda html, subject: sent.update(html=html, subject=subject))
+    assert _run(monkeypatch, ["--dry-run"]) == 0
+    assert not sent  # dry run must not email
+
+    assert _run(monkeypatch, ["--send-only"]) == 0
+    assert "2 stocks down >15%" in sent["subject"]
+    assert "Alpha Ltd" in sent["html"]
+
+
+def test_send_only_refuses_a_stale_report(offline, monkeypatch):
+    """A saved report older than MAX_REPORT_AGE_HOURS must not be replayed."""
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setattr(main.emailer, "send", lambda html, subject: pytest.fail("must not send"))
+    assert _run(monkeypatch, ["--dry-run"]) == 0
+    meta_path = offline / "out" / "meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["generated_at"] = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
+    meta_path.write_text(json.dumps(meta))
+    with pytest.raises(RuntimeError, match="stale"):
+        _run(monkeypatch, ["--send-only"])
+
+
+def test_send_only_without_a_saved_report_fails_clearly(offline, monkeypatch):
+    with pytest.raises(RuntimeError, match="No saved report"):
+        _run(monkeypatch, ["--send-only"])
+
+
 def test_missing_smtp_does_not_send_or_fail(offline, monkeypatch):
     """A live run without SMTP secrets should still exit 0 with a report on disk."""
     assert _run(monkeypatch, []) == 0

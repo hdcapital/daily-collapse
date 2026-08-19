@@ -1,0 +1,57 @@
+name: ASX Daily Crash Send
+
+on:
+  schedule:
+    # 19:00 UTC = 5:00am AEST the next morning (6:00am AEDT in summer).
+    # Delivers the report saved by daily-scan.yml the previous Sydney evening.
+    # Mon-Fri UTC = Tue-Sat mornings Sydney, one delivery per trading session.
+    - cron: "0 19 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Locate today's scan run
+        id: scan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # The paired scan ran at 10:00 UTC the same UTC day. No successful scan
+        # today means there is nothing fresh to send — fail loudly rather than
+        # delivering a stale report.
+        run: |
+          run_id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/daily-scan.yml/runs?status=success&created=$(date -u +%Y-%m-%d)&per_page=1" --jq '.workflow_runs[0].id // empty')
+          if [ -z "$run_id" ]; then
+            echo "::error::No successful scan run today — refusing to send a stale report."
+            exit 1
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download the saved report
+        uses: actions/download-artifact@v4
+        with:
+          name: report
+          path: out/
+          run-id: ${{ steps.scan.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Send the report
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python -m src.main --send-only

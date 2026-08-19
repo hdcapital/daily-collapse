@@ -12,6 +12,14 @@ BATCH = 250  # tickers per yfinance batch request
 
 COLUMNS = ["ticker", "prev_close", "close", "pct_change", "volume", "date"]
 
+# On a normal day ~20% of the universe is halted or untraded and legitimately
+# lags the latest session. When nearly *everything* lags, the problem is the
+# data, not the market: between Sydney midnight and Yahoo's EOD consolidation
+# the just-completed session's bar is missing for almost every ticker (observed
+# 2026-08-19: 1828 of 1832 tickers had no bar for the session at 5:32am and
+# still at 6:43am Sydney). Reporting "quiet day" off that would be a lie.
+MAX_STALE_FRACTION = 0.8
+
 
 def daily_moves(tickers: list[str]) -> pd.DataFrame:
     """Return DataFrame [ticker, prev_close, close, pct_change, volume, date] for the
@@ -59,6 +67,11 @@ def _latest_session_only(moves: pd.DataFrame) -> pd.DataFrame:
     latest = moves["date"].max()
     fresh = moves[moves["date"] == latest]
     stale = len(moves) - len(fresh)
+    if stale / len(moves) > MAX_STALE_FRACTION:
+        raise RuntimeError(
+            f"Only {len(fresh)} of {len(moves)} tickers have a bar for {latest} — "
+            "price data looks incomplete (Yahoo EOD gap?), refusing to report a quiet day on it"
+        )
     if stale:
         log.info("Dropped %d ticker(s) with no bar for %s (halted or untraded)", stale, latest)
     return fresh.reset_index(drop=True)

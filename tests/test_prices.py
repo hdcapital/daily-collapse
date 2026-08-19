@@ -69,6 +69,27 @@ def test_stale_bars_are_dropped(monkeypatch):
     assert moves["date"].nunique() == 1
 
 
+def test_mass_stale_data_raises_instead_of_quiet_day(monkeypatch):
+    """The 2026-08-19 5am incident: between Sydney midnight and Yahoo's EOD
+    consolidation nearly every ticker's latest bar was the *previous* session.
+    Filtering that down and reporting a quiet day is a lie — refuse instead."""
+    histories = {f"T{i}.AX": bars([1.00, 0.70], start="2026-08-03") for i in range(9)}
+    histories["AAA.AX"] = bars([1.00, 1.00, 1.00, 1.00, 0.90], start="2026-08-03")
+    install_yf(monkeypatch, histories)
+    with pytest.raises(RuntimeError, match="looks incomplete"):
+        prices.daily_moves(["AAA"] + [f"T{i}" for i in range(9)])
+
+
+def test_normal_stale_fraction_still_passes(monkeypatch):
+    """A typical day has ~20% halted/untraded — that must keep working."""
+    histories = {f"T{i}.AX": bars([1.00, 1.00, 1.00, 1.00, 0.90], start="2026-08-03") for i in range(8)}
+    histories["H1.AX"] = bars([1.00, 0.70], start="2026-08-03")
+    histories["H2.AX"] = bars([1.00, 0.70], start="2026-08-03")
+    install_yf(monkeypatch, histories)
+    moves = prices.daily_moves([f"T{i}" for i in range(8)] + ["H1", "H2"])
+    assert len(moves) == 8
+
+
 def test_zero_prev_close_is_skipped(monkeypatch):
     """A 0.00 prior close would make pct_change infinite — drop the ticker."""
     install_yf(monkeypatch, {"ZERO.AX": bars([0.0, 0.5]), "AAA.AX": bars([1.0, 0.8])})
