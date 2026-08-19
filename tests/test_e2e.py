@@ -87,6 +87,14 @@ def test_dry_run_writes_report(offline, monkeypatch):
     assert "500,000" in html  # volume formatting
 
 
+def test_report_is_dated_by_the_session(offline, monkeypatch):
+    """The scheduled run fires ~5am Sydney the next morning — the masthead and
+    subject must carry the session's date, not the run day's."""
+    assert _run(monkeypatch, ["--dry-run"]) == 0
+    html = (offline / "out" / "report.html").read_text()
+    assert "Fri 07 Aug 2026" in html  # last bar in the fake histories
+
+
 def test_quiet_day_renders(offline, monkeypatch, tmp_path):
     """No stock past the threshold must still produce a report, not a crash."""
     cfg = dict(main.load_config(), threshold_pct=99)
@@ -173,7 +181,12 @@ def test_ai_enabled_path(offline, monkeypatch):
     import types
 
     class Resp:
-        output_text = '{"reason":"Placement at a 30% discount.","confidence":"high","description":"Gold explorer."}'
+        output_text = (
+            '{"reason":"FY results missed guidance.","confidence":"high",'
+            '"description":"Gold explorer.",'
+            '"highlights":["Revenue up 8% to $410M"],'
+            '"lowlights":["FY27 guidance cut 10%"]}'
+        )
 
     class FakeOpenAI:
         def __init__(self, *a, **k):
@@ -195,8 +208,12 @@ def test_ai_enabled_path(offline, monkeypatch):
 
     assert _run(monkeypatch, ["--dry-run"]) == 0
     html = (main.Path("out") / "report.html").read_text()
-    assert "Placement at a 30% discount." in html
+    assert "FY results missed guidance." in html
     assert "HIGH" in html
+    # Results-day highlights/lowlights reach the report.
+    assert "FROM TODAY'S ANNOUNCEMENT" in html
+    assert "Revenue up 8% to $410M" in html
+    assert "FY27 guidance cut 10%" in html
 
 
 def test_datalake_context_reaches_the_report(offline, monkeypatch, tmp_path):

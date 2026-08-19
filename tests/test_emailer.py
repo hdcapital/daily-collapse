@@ -63,6 +63,28 @@ def test_ai_text_is_html_escaped():
     assert "&amp;" in html
 
 
+def test_results_highlights_and_lowlights_render():
+    html = emailer.render(
+        _ctx([_row(highlights=["Revenue up 8% to $410M"], lowlights=["FY27 guidance cut 10%"])])
+    )
+    assert "FROM TODAY'S ANNOUNCEMENT" in html
+    assert "Revenue up 8% to $410M" in html
+    assert "FY27 guidance cut 10%" in html
+
+
+def test_no_announcement_block_without_highlights():
+    html = emailer.render(_ctx([_row()]))  # rows may lack the keys entirely
+    assert "ANNOUNCEMENT" not in html
+    html = emailer.render(_ctx([_row(highlights=[], lowlights=[])]))
+    assert "ANNOUNCEMENT" not in html
+
+
+def test_highlights_are_html_escaped():
+    html = emailer.render(_ctx([_row(lowlights=['<img src=x onerror=alert(1)> margin <2%'])]))
+    assert "<img" not in html
+    assert "&lt;img" in html
+
+
 def test_company_name_is_escaped():
     html = emailer.render(_ctx([_row(name="Smith & Sons <Holdings>")]))
     assert "Smith &amp; Sons" in html

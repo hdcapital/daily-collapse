@@ -2,9 +2,10 @@ name: ASX Daily Crash Scan
 
 on:
   schedule:
-    # 08:30 UTC = 6:30pm AEST (winter) / 7:30pm AEDT (summer).
-    # ASX closes 4:00pm Sydney; closing auction settles ~4:12pm, so data is final by then.
-    - cron: "30 8 * * 1-5"
+    # 19:00 UTC = 5:00am AEST the next morning (6:00am AEDT in summer).
+    # Mon-Fri UTC = Tue-Sat mornings Sydney: one run per trading session,
+    # delivered before the next open, well after the ~4:12pm closing auction.
+    - cron: "0 19 * * 1-5"
   workflow_dispatch:
     inputs:
       dry_run:
