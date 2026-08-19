@@ -92,13 +92,15 @@ def test_results_day_highlights_and_lowlights(monkeypatch):
     assert a.lowlights == ["EBITDA margin fell to 26%", "FY27 guidance cut 10%"]
 
 
-def test_prompt_asks_about_todays_results_first(monkeypatch):
-    """Results releases are the top cause of reporting-season falls (the HSN miss):
-    the prompt must direct the model to check for them explicitly, with the date."""
+def test_prompt_covers_results_among_any_cause(monkeypatch):
+    """The search stays general (any news can explain a fall), but results must be
+    named as a candidate cause — a generic prompt missed HSN's results day — and
+    the model must be told to fill highlights/lowlights from a same-day release."""
     install_openai(monkeypatch, [Resp(GOOD)])
     _analyse()
     prompt = FakeOpenAI.instances[0].calls[0]["input"]
     assert "financial results" in prompt
+    assert "anything else" in prompt  # explicitly open-ended
     assert "2026-08-07" in prompt
     assert "highlights" in prompt and "lowlights" in prompt
 
