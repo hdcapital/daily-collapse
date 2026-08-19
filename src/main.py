@@ -123,6 +123,8 @@ def enrich(row, f, cfg) -> dict:
         "reason": a.reason,
         "confidence": a.confidence,
         "description": a.description or "No description available.",
+        "highlights": a.highlights,
+        "lowlights": a.lowlights,
         "metrics": [
             ("Mkt cap", fmt_money(mcap)),
             ("EV", fmt_money(f.enterprise_value)),

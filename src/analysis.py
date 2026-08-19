@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +20,12 @@ SYSTEM = (
     "Respond ONLY with a JSON object, no markdown fences, with keys: "
     "reason (string, <=60 words, why the stock fell today, cite the trigger if found), "
     "confidence (one of: high, medium, low, none-found), "
-    "description (string, <=30 words, plain-English what the company does)."
+    "description (string, <=30 words, plain-English what the company does), "
+    "highlights (array of <=5 short strings: the positives in the results or other "
+    "price-sensitive announcement the company released today, figures included; "
+    "empty if it released none today), "
+    "lowlights (array of <=5 short strings: the negatives from that release — "
+    "the numbers behind the fall; empty if it released none today)."
 )
 
 # Structured Outputs schema — strict mode requires every property to be listed
@@ -31,8 +36,24 @@ SCHEMA = {
         "reason": {"type": "string", "description": "Why the stock fell today, <=60 words."},
         "confidence": {"type": "string", "enum": VALID_CONFIDENCE},
         "description": {"type": "string", "description": "What the company does, <=30 words."},
+        "highlights": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Positives from the results or price-sensitive announcement released "
+                "today, <=5 short points with figures; empty if none released today."
+            ),
+        },
+        "lowlights": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Negatives from that release — the numbers behind the fall, "
+                "<=5 short points; empty if none released today."
+            ),
+        },
     },
-    "required": ["reason", "confidence", "description"],
+    "required": ["reason", "confidence", "description", "highlights", "lowlights"],
     "additionalProperties": False,
 }
 
@@ -42,6 +63,8 @@ class Analysis:
     reason: str = "AI analysis unavailable."
     confidence: str = "none-found"
     description: str = ""
+    highlights: list[str] = field(default_factory=list)
+    lowlights: list[str] = field(default_factory=list)
 
 
 def analyse(
@@ -65,9 +88,15 @@ def analyse(
             f"{name} (ASX:{ticker}) closed down {pct_change:.1f}% on {date}.\n\n"
             f"Company summary on file:\n{yf_summary[:1200] or '(none)'}\n\n"
             f"Internal data-lake extracts:\n{lake[:6000]}\n\n"
-            "Search the web for today's ASX announcements, trading halts, capital "
-            "raisings, downgrades, drill results or news explaining the fall, then "
-            "answer in the required JSON."
+            f"First check whether {name} released financial results, guidance or "
+            f"another price-sensitive ASX announcement on {date} — results are the "
+            "most common cause of sharp falls in the February and August reporting "
+            "seasons. If it did, base `reason` on the specific disappointment "
+            "(versus expectations or prior guidance) and fill `highlights` and "
+            "`lowlights` with the release's key numbers. Otherwise leave both "
+            "empty and search for trading halts, capital raisings, downgrades, "
+            "drill results or other news explaining the fall. Then answer in the "
+            "required JSON."
         )
         model = ai.get("model", "gpt-5.6-terra")
         text = _request(client, model, prompt, ai)
@@ -165,8 +194,19 @@ def _parse(text: str, yf_summary: str) -> Analysis:
             reason=str(d.get("reason", "")).strip() or "No clear catalyst identified.",
             confidence=confidence if confidence in VALID_CONFIDENCE else "low",
             description=str(d.get("description", "")).strip() or _shorten(yf_summary),
+            highlights=_str_list(d.get("highlights")),
+            lowlights=_str_list(d.get("lowlights")),
         )
     return Analysis(description=_shorten(yf_summary))
+
+
+def _str_list(v, max_items: int = 5) -> list[str]:
+    """Defensive coercion for the highlights/lowlights arrays: strings only,
+    stripped, empties dropped, capped — the fallback path isn't schema-checked."""
+    if not isinstance(v, list):
+        return []
+    items = [x.strip() for x in v if isinstance(x, str) and x.strip()]
+    return items[:max_items]
 
 
 def _shorten(summary: str, max_words: int = 30) -> str:

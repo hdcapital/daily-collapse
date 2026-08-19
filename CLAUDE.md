@@ -72,6 +72,12 @@ Everything degrades gracefully when a secret is missing — the run still produc
 - Keep AI responses parseable: `analysis.SCHEMA` is sent as a strict Structured
   Output *and* `analysis.SYSTEM` demands raw JSON, so the fallback path still
   works; `_parse` scans brace-balanced `{...}` spans as a fence-tolerant backstop.
+- The analysis prompt directs the model to check for **results/guidance released
+  on the fall date first** (reporting-season falls are usually results-driven —
+  a generic "search the news" prompt missed HSN's FY26 results on 2026-08-19)
+  and to fill `highlights`/`lowlights` from the release; the email renders them
+  as a "From today's announcement" block only when non-empty. `_str_list` caps
+  and sanitises the arrays because the no-tools fallback isn't schema-checked.
 - `get_fundamentals` retries Yahoo rate limits (RETRY_DELAYS pauses) with a
   process-wide breaker: once one ticker burns all retries, later tickers get a
   single quick attempt until a success re-arms it. A failed request sets

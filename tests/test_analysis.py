@@ -68,12 +68,52 @@ def _analyse():
     )
 
 
+RESULTS = (
+    '{"reason": "FY26 results missed guidance.", "confidence": "high", '
+    '"description": "Billing software vendor.", '
+    '"highlights": ["Revenue up 8% to $410M", "Dividend maintained at 5c"], '
+    '"lowlights": ["EBITDA margin fell to 26%", "FY27 guidance cut 10%"]}'
+)
+
+
 def test_happy_path(monkeypatch):
     install_openai(monkeypatch, [Resp(GOOD)])
     a = _analyse()
     assert a.reason == "Placement at 30% discount."
     assert a.confidence == "high"
     assert a.description == "Gold explorer."
+    assert a.highlights == [] and a.lowlights == []
+
+
+def test_results_day_highlights_and_lowlights(monkeypatch):
+    install_openai(monkeypatch, [Resp(RESULTS)])
+    a = _analyse()
+    assert a.highlights == ["Revenue up 8% to $410M", "Dividend maintained at 5c"]
+    assert a.lowlights == ["EBITDA margin fell to 26%", "FY27 guidance cut 10%"]
+
+
+def test_prompt_asks_about_todays_results_first(monkeypatch):
+    """Results releases are the top cause of reporting-season falls (the HSN miss):
+    the prompt must direct the model to check for them explicitly, with the date."""
+    install_openai(monkeypatch, [Resp(GOOD)])
+    _analyse()
+    prompt = FakeOpenAI.instances[0].calls[0]["input"]
+    assert "financial results" in prompt
+    assert "2026-08-07" in prompt
+    assert "highlights" in prompt and "lowlights" in prompt
+
+
+def test_highlight_lists_are_sanitised(monkeypatch):
+    """The fallback path isn't schema-checked — junk entries must not reach the email."""
+    dirty = (
+        '{"reason": "x", "confidence": "high", "description": "y", '
+        '"highlights": ["  ok  ", "", 42, {"a": 1}, "b", "c", "d", "e", "f"], '
+        '"lowlights": "not a list"}'
+    )
+    install_openai(monkeypatch, [Resp(dirty)])
+    a = _analyse()
+    assert a.highlights == ["ok", "b", "c", "d", "e"]  # stripped, non-strings dropped, capped at 5
+    assert a.lowlights == []
 
 
 def test_uses_responses_api_with_web_search(monkeypatch):
