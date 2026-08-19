@@ -40,14 +40,25 @@ class FakeYF(types.ModuleType):
 
     ``histories`` maps a Yahoo symbol (e.g. "AAA.AX") to a bars() frame.
     ``infos`` maps the same symbol to the dict ``Ticker.info`` should return.
+    ``info_errors`` maps a symbol to a list of exceptions: each ``.info`` access
+    raises the next one until the list is empty, then ``infos`` answers — so a
+    rate-limit that clears after N attempts is one line to simulate.
     """
 
-    def __init__(self, histories: dict[str, pd.DataFrame], infos: dict | None = None, fail_batches: bool = False):
+    def __init__(
+        self,
+        histories: dict[str, pd.DataFrame],
+        infos: dict | None = None,
+        fail_batches: bool = False,
+        info_errors: dict[str, list[Exception]] | None = None,
+    ):
         super().__init__("yfinance")
         self.histories = histories
         self.infos = infos or {}
         self.fail_batches = fail_batches
+        self.info_errors = info_errors or {}
         self.download_calls: list[list[str]] = []
+        self.info_calls: list[str] = []
 
     def download(self, tickers, **kwargs):
         self.download_calls.append(list(tickers))
@@ -59,12 +70,16 @@ class FakeYF(types.ModuleType):
         return multi_download(present)
 
     def Ticker(self, symbol):  # noqa: N802 - mirrors yfinance's API
-        infos = self.infos
+        fake = self
 
         class _T:
             @property
             def info(self):
-                return infos.get(symbol, {})
+                fake.info_calls.append(symbol)
+                errors = fake.info_errors.get(symbol)
+                if errors:
+                    raise errors.pop(0)
+                return fake.infos.get(symbol, {})
 
             @property
             def income_stmt(self):
@@ -73,8 +88,8 @@ class FakeYF(types.ModuleType):
         return _T()
 
 
-def install_yf(monkeypatch, histories, infos=None, fail_batches=False) -> FakeYF:
-    fake = FakeYF(histories, infos, fail_batches)
+def install_yf(monkeypatch, histories, infos=None, fail_batches=False, info_errors=None) -> FakeYF:
+    fake = FakeYF(histories, infos, fail_batches, info_errors)
     monkeypatch.setitem(sys.modules, "yfinance", fake)
     return fake
 

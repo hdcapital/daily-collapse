@@ -65,6 +65,13 @@ def screen_by_revenue(candidates: list[tuple], cfg: dict) -> tuple[list[tuple], 
     include_unknown = bool(cfg.get("include_unknown_revenue", False))
     kept, hidden = [], 0
     for row, f in candidates:
+        if f.fetch_failed:
+            # The Yahoo request errored (rate limit, outage) — that is not the
+            # same as "no revenue figure exists". A confirmed faller must not
+            # vanish because enrichment failed, so assume it clears the bar.
+            log.info("%s: fundamentals fetch failed — kept, revenue hurdle assumed met", row["ticker"])
+            kept.append((row, f))
+            continue
         if f.revenue is None:
             if include_unknown:
                 kept.append((row, f))

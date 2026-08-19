@@ -234,6 +234,23 @@ def test_revenue_screen_keeps_unknown_when_configured(offline, monkeypatch):
     assert "Beta Ltd" in (main.Path("out") / "report.html").read_text()
 
 
+def test_rate_limited_fundamentals_do_not_blank_the_report(offline, monkeypatch):
+    """Regression: 2026-08-19 Yahoo throttled every fundamentals call, so all 21
+    fallers (HSN included) read as revenue-unknown and the email said quiet day.
+    A fetch failure must fail open, not feed the revenue screen."""
+    err = "Too Many Requests. Rate limited. Try after a while."
+    install_yf(
+        monkeypatch,
+        HISTORIES,
+        INFOS,
+        info_errors={s: [RuntimeError(err) for _ in range(10)] for s in ("AAA.AX", "BBB.AX")},
+    )
+    assert _run(monkeypatch, ["--dry-run"]) == 0
+    html = (main.Path("out") / "report.html").read_text()
+    assert "Alpha Ltd" in html and "Beta Ltd" in html
+    assert "A quiet close." not in html
+
+
 def test_revenue_screen_off_by_zero(offline, monkeypatch):
     infos = dict(INFOS)
     infos["AAA.AX"] = dict(INFOS["AAA.AX"], totalRevenue=1_000_000)

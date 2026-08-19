@@ -93,6 +93,13 @@ def test_revenue_screen_handles_zero_revenue():
     assert kept == [] and hidden == 1
 
 
+def test_revenue_screen_fails_open_on_fetch_failure():
+    """A failed Yahoo request is not "no revenue" — the stock stays in."""
+    cand = ({"ticker": "AAA"}, Fundamentals(fetch_failed=True))
+    kept, hidden = screen_by_revenue([cand], {"min_revenue_aud": 20e6})
+    assert len(kept) == 1 and hidden == 0
+
+
 def test_ratio_formatting():
     assert fmt_money(1_500_000_000) == "$1.5B"
     assert fmt_money(23_400_000) == "$23.4M"
