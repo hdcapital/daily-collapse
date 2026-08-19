@@ -2,16 +2,24 @@
 
 Usage:
     python -m src.main                 # full run, sends email
-    python -m src.main --dry-run       # renders out/report.html, no email
+    python -m src.main --dry-run       # renders out/report.html + meta.json, no email
+    python -m src.main --send-only     # emails a report saved by a previous run
     python -m src.main --limit 50      # scan only first 50 tickers (fast test)
+
+In CI the pipeline is split: the scan runs in the Sydney evening (while Yahoo
+still serves the session's bar from its live feed) with --dry-run, and a
+separate 5am job delivers the saved report with --send-only. Between Sydney
+midnight and Yahoo's EOD consolidation the completed bar is missing for almost
+the whole ASX, so the scan cannot run at delivery time.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -135,8 +143,12 @@ def enrich(row, f, cfg) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="render HTML, don't email")
+    ap.add_argument("--send-only", action="store_true", help="email the report saved by a previous run")
     ap.add_argument("--limit", type=int, default=0, help="cap universe size for testing")
     args = ap.parse_args()
+
+    if args.send_only:
+        return send_saved_report()
 
     cfg = load_config()
 
@@ -178,25 +190,65 @@ def main() -> int:
     )
     html = emailer.render(ctx)
 
-    out = Path("out")
-    out.mkdir(exist_ok=True)
-    (out / "report.html").write_text(html)
-    log.info("Report written to out/report.html")
-
-    if args.dry_run:
-        log.info("Dry run — email not sent.")
-        return 0
-
     n = total_fallers
     subject = (
         f"ASX Fall Wire · {report_date} · {n} stock{'s' if n != 1 else ''} down >{cfg['threshold_pct']:g}%"
         if n
         else f"ASX Fall Wire · {report_date} · quiet close"
     )
+
+    out = Path("out")
+    out.mkdir(exist_ok=True)
+    (out / "report.html").write_text(html)
+    # Everything the later --send-only job needs to deliver this report.
+    (out / "meta.json").write_text(
+        json.dumps(
+            {
+                "subject": subject,
+                "report_date": report_date,
+                "total_fallers": total_fallers,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    )
+    log.info("Report written to out/report.html")
+
+    if args.dry_run:
+        log.info("Dry run — email not sent.")
+        return 0
+
     if not os.environ.get("SMTP_HOST"):
         log.warning("SMTP secrets not set — skipping send (report still in out/report.html)")
         return 0
     emailer.send(html, subject)
+    return 0
+
+
+# A saved report older than this is not this morning's report — refuse to send
+# it rather than replay an old session's falls (e.g. after a skipped scan run).
+MAX_REPORT_AGE_HOURS = 20
+
+
+def send_saved_report() -> int:
+    """Deliver the report a previous --dry-run scan wrote to out/.
+
+    The 5am delivery job runs this after downloading the evening scan's
+    artifact; the scan itself cannot run at that hour (see module docstring).
+    """
+    out = Path("out")
+    try:
+        html = (out / "report.html").read_text()
+        meta = json.loads((out / "meta.json").read_text())
+    except FileNotFoundError as e:
+        raise RuntimeError(f"No saved report to send — run the scan first ({e})") from e
+
+    generated = datetime.fromisoformat(meta["generated_at"])
+    age_hours = (datetime.now(timezone.utc) - generated).total_seconds() / 3600
+    if age_hours > MAX_REPORT_AGE_HOURS:
+        raise RuntimeError(
+            f"Saved report ({meta['report_date']}) is {age_hours:.0f}h old — refusing to send a stale report"
+        )
+    emailer.send(html, meta["subject"])
     return 0
 
 

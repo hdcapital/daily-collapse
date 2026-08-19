@@ -2,16 +2,15 @@ name: ASX Daily Crash Scan
 
 on:
   schedule:
-    # 19:00 UTC = 5:00am AEST the next morning (6:00am AEDT in summer).
-    # Mon-Fri UTC = Tue-Sat mornings Sydney: one run per trading session,
-    # delivered before the next open, well after the ~4:12pm closing auction.
-    - cron: "0 19 * * 1-5"
+    # 10:00 UTC = 8:00pm AEST / 9:00pm AEDT — the same Sydney evening as the
+    # close, while Yahoo still serves the session's bar from its live feed.
+    # After Sydney midnight the completed bar vanishes from the daily history
+    # until Yahoo's EOD consolidation (observed still missing at 6:43am), so
+    # the scan CANNOT run at delivery time: this job only renders and saves
+    # the report, and daily-send.yml emails it at ~5am Sydney.
+    - cron: "0 10 * * 1-5"
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "Dry run (render HTML artifact, don't send email)"
-        type: boolean
-        default: false
       limit:
         description: "Limit universe size (for fast testing, 0 = full)"
         default: "0"
@@ -31,19 +30,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Cheap offline gate — don't email a report built from broken code.
+      # Cheap offline gate — don't save a report built from broken code.
       - name: Run tests
         run: pytest -q
 
-      - name: Run scan
+      - name: Run scan (render only — daily-send.yml delivers it)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
           # Optional data-lake (S3) credentials — leave unset to skip the lake scan
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -51,15 +44,13 @@ jobs:
           DATALAKE_S3_BUCKET: ${{ secrets.DATALAKE_S3_BUCKET }}
           DATALAKE_S3_PREFIX: ${{ secrets.DATALAKE_S3_PREFIX }}
         run: |
-          ARGS=""
-          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          ARGS="--dry-run"
           if [ "${{ inputs.limit }}" != "0" ] && [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
           python -m src.main $ARGS
 
-      - name: Upload rendered report (always, for inspection)
-        if: always()
+      - name: Save report for the morning send
         uses: actions/upload-artifact@v4
         with:
           name: report
           path: out/
-          if-no-files-found: ignore
+          if-no-files-found: error
