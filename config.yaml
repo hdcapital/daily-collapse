@@ -26,6 +26,9 @@ min_revenue_aud: 20000000
 # Yahoo has no revenue figure for some companies. When the screen is on they are
 # dropped by default — you cannot show a stock is above the bar without a number.
 # Set true to keep them instead.
+# This only applies when Yahoo answered. If the fundamentals request itself
+# failed (rate limit, outage), the stock is always kept — better to report too
+# many than to silently drop a confirmed faller.
 include_unknown_revenue: false
 
 # Safety valve: cap how many stocks get the full AI + fundamentals treatment

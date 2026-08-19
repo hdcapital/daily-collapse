@@ -72,6 +72,16 @@ Everything degrades gracefully when a secret is missing — the run still produc
 - Keep AI responses parseable: `analysis.SCHEMA` is sent as a strict Structured
   Output *and* `analysis.SYSTEM` demands raw JSON, so the fallback path still
   works; `_parse` scans brace-balanced `{...}` spans as a fence-tolerant backstop.
+- `get_fundamentals` retries Yahoo rate limits (RETRY_DELAYS pauses) with a
+  process-wide breaker: once one ticker burns all retries, later tickers get a
+  single quick attempt until a success re-arms it. A failed request sets
+  `Fundamentals.fetch_failed` and `screen_by_revenue` then **fails open** —
+  a confirmed faller must not vanish because enrichment errored (the 2026-08-19
+  HSN incident: rate-limited fundamentals made 21 fallers read as
+  revenue-unknown and the email said quiet day). `fetch_failed` is distinct
+  from an answered-but-empty info dict, which still counts as unknown revenue.
+  Tests never really sleep: `tests/conftest.py` autouse-patches
+  `fundamentals._sleep` and resets the breaker.
 - `analysis._request` retries once without `tools`/`text` if the model rejects
   them, so an ID that lacks web search or Structured Outputs still answers —
   watch the Actions log for that warning, it means answers aren't search-backed.
