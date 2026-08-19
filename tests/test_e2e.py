@@ -87,6 +87,14 @@ def test_dry_run_writes_report(offline, monkeypatch):
     assert "500,000" in html  # volume formatting
 
 
+def test_report_is_dated_by_the_session(offline, monkeypatch):
+    """The scheduled run fires ~5am Sydney the next morning — the masthead and
+    subject must carry the session's date, not the run day's."""
+    assert _run(monkeypatch, ["--dry-run"]) == 0
+    html = (offline / "out" / "report.html").read_text()
+    assert "Fri 07 Aug 2026" in html  # last bar in the fake histories
+
+
 def test_quiet_day_renders(offline, monkeypatch, tmp_path):
     """No stock past the threshold must still produce a report, not a crash."""
     cfg = dict(main.load_config(), threshold_pct=99)

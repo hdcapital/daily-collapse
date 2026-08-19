@@ -13,7 +13,6 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -22,8 +21,6 @@ from .fundamentals import fmt_money, fmt_ratio, get_fundamentals
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("main")
-
-SYD = ZoneInfo("Australia/Sydney")
 
 
 def load_config() -> dict:
@@ -142,14 +139,15 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = load_config()
-    now_syd = datetime.now(SYD)
-    report_date = now_syd.strftime("%a %d %b %Y")
 
     uni = universe.fetch_asx_universe()
     if args.limit:
         uni = uni.head(args.limit)
 
     moves = prices.daily_moves(uni["ticker"].tolist())
+    # Date the report by the session it covers, not the wall clock — the
+    # scheduled run fires at ~5am Sydney the morning after the close.
+    report_date = datetime.strptime(moves["date"].max(), "%Y-%m-%d").strftime("%a %d %b %Y")
     fallers = prices.find_fallers(moves, cfg["threshold_pct"])
     log.info("%d fallers beyond -%s%%", len(fallers), cfg["threshold_pct"])
 

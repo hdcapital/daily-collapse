@@ -13,7 +13,8 @@ AI web-search analysis) → send a styled HTML email.
 - `src/analysis.py` — OpenAI Responses API (web_search tool) "why did it fall"
 - `src/emailer.py` + `src/templates/email.html.j2` — report render + SMTP
 - `config.yaml` — threshold, sector exclusions, revenue screen, caps
-- `.github/workflows/daily-scan.yml` — cron 08:30 UTC Mon–Fri
+- `.github/workflows/daily-scan.yml` — cron 19:00 UTC Mon–Fri (≈5am AEST the
+  morning after each session)
 
 ## Test commands
 ```bash
@@ -37,10 +38,13 @@ Everything degrades gracefully when a secret is missing — the run still produc
 - Yahoo tickers are `<CODE>.AX`; some illiquid micro-caps have no data → skipped silently.
 - The ASX directory access token in `universe.py` is the public one behind the
   asx.com.au download button; if it rotates, update it or rely on the fallback URL.
-- `pct_change` is close-vs-previous-close of daily bars; on the run day yfinance's
-  last bar must be today's — the workflow runs well after the 4:12pm closing auction.
-  `prices._latest_session_only` enforces this: tickers whose last bar predates the
-  newest bar in the batch are dropped, so a halted stock can't report a week-old fall.
+- `pct_change` is close-vs-previous-close of daily bars; yfinance's last bar must
+  be the most recent completed session — the workflow runs at ~5am Sydney, well
+  after the prior day's 4:12pm closing auction, and the report is **dated by that
+  session** (`moves["date"].max()`), not the wall clock at run time.
+  `prices._latest_session_only` enforces freshness: tickers whose last bar
+  predates the newest bar in the batch are dropped, so a halted stock can't
+  report a week-old fall.
 - `find_fallers` is strict (`< -threshold`), matching "more than X%" in the config,
   README and email copy.
 - Fundamentals are fetched in `main.main` *before* `screen_by_revenue` and the cap,
