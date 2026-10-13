@@ -27,13 +27,17 @@ jobs:
         id: scan
         env:
           GH_TOKEN: ${{ github.token }}
-        # The paired scan ran at 10:00 UTC the same UTC day. No successful scan
-        # today means there is nothing fresh to send — fail loudly rather than
-        # delivering a stale report.
+        # Look back 20h (= MAX_REPORT_AGE_HOURS), not "same UTC date": GitHub
+        # starts scheduled runs hours late (Oct 2026: scan up to ~9.5h, send up
+        # to ~6h), so the send can land after 00:00 UTC while its scan ran the
+        # previous UTC day. No successful scan in the window means there is
+        # nothing fresh to send — fail loudly rather than deliver a stale report.
         run: |
-          run_id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/daily-scan.yml/runs?status=success&created=$(date -u +%Y-%m-%d)&per_page=1" --jq '.workflow_runs[0].id // empty')
+          since=$(date -u -d '20 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+          run_id=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/workflows/daily-scan.yml/runs" \
+            -f status=success -f "created=>=${since}" -f per_page=1 --jq '.workflow_runs[0].id // empty')
           if [ -z "$run_id" ]; then
-            echo "::error::No successful scan run today — refusing to send a stale report."
+            echo "::error::No successful scan run since ${since} — refusing to send a stale report."
             exit 1
           fi
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
