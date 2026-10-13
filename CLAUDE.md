@@ -59,7 +59,9 @@ Everything degrades gracefully when a secret is missing — the run still produc
   report a week-old fall — and if more than `MAX_STALE_FRACTION` of tickers
   look stale it raises instead, because that pattern means broken data, and
   filtering it would email a false "quiet close".
-- `daily-send.yml` picks the **newest successful scan run of the UTC day** —
+- `daily-send.yml` picks the **newest successful scan run of the last 20h** (not
+  "same UTC date": GitHub starts cron runs hours late, so the send can cross
+  00:00 UTC — that broke the 2026-10-06 and 10-13 emails) —
   a manual `--limit` test scan left as the day's last run would become the
   morning email. `send_saved_report` also refuses reports older than
   `MAX_REPORT_AGE_HOURS` (20h), so a skipped scan can't replay yesterday.
